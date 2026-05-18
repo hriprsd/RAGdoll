@@ -1,0 +1,29 @@
+app:
+  name: my-service
+  version: 1.0.0
+  environment: production
+
+server:
+  host: 0.0.0.0
+  port: 8080
+  workers: 4
+
+database:
+  url: sqlite:///data/app.db
+  pool_size: 5
+  timeout: 30
+
+auth:
+  jwt_secret: ${JWT_SECRET}
+  token_expiry_seconds: 3600
+  refresh_token_expiry_days: 30
+
+rate_limiting:
+  enabled: true
+  requests_per_minute: 60
+  burst_limit: 10
+
+logging:
+  level: INFO
+  format: json
+  output: stdout

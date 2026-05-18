@@ -1,0 +1,175 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" shape-rendering="crispEdges">
+  <!-- RAGdoll — Raggedy Ann pixel art, 16x16 grid (8px per cell) -->
+  <!-- Dangerous Dave / DOS-era palette -->
+
+  <!-- Hair - wild red yarn -->
+  <rect x="24" y="0" width="8" height="8" fill="#cc2200"/>
+  <rect x="40" y="0" width="8" height="8" fill="#cc2200"/>
+  <rect x="56" y="0" width="8" height="8" fill="#cc2200"/>
+  <rect x="72" y="0" width="8" height="8" fill="#cc2200"/>
+  <rect x="88" y="0" width="8" height="8" fill="#cc2200"/>
+
+  <rect x="16" y="8" width="8" height="8" fill="#cc2200"/>
+  <rect x="24" y="8" width="8" height="8" fill="#e83a1d"/>
+  <rect x="32" y="8" width="8" height="8" fill="#cc2200"/>
+  <rect x="40" y="8" width="8" height="8" fill="#e83a1d"/>
+  <rect x="48" y="8" width="8" height="8" fill="#cc2200"/>
+  <rect x="56" y="8" width="8" height="8" fill="#e83a1d"/>
+  <rect x="64" y="8" width="8" height="8" fill="#cc2200"/>
+  <rect x="72" y="8" width="8" height="8" fill="#e83a1d"/>
+  <rect x="80" y="8" width="8" height="8" fill="#cc2200"/>
+  <rect x="88" y="8" width="8" height="8" fill="#e83a1d"/>
+  <rect x="96" y="8" width="8" height="8" fill="#cc2200"/>
+
+  <!-- Hair sides + face row 1 -->
+  <rect x="8" y="16" width="8" height="8" fill="#cc2200"/>
+  <rect x="16" y="16" width="8" height="8" fill="#e83a1d"/>
+  <rect x="24" y="16" width="8" height="8" fill="#f5c6a0"/>
+  <rect x="32" y="16" width="8" height="8" fill="#f5c6a0"/>
+  <rect x="40" y="16" width="8" height="8" fill="#f5c6a0"/>
+  <rect x="48" y="16" width="8" height="8" fill="#f5c6a0"/>
+  <rect x="56" y="16" width="8" height="8" fill="#f5c6a0"/>
+  <rect x="64" y="16" width="8" height="8" fill="#f5c6a0"/>
+  <rect x="72" y="16" width="8" height="8" fill="#f5c6a0"/>
+  <rect x="80" y="16" width="8" height="8" fill="#f5c6a0"/>
+  <rect x="88" y="16" width="8" height="8" fill="#f5c6a0"/>
+  <rect x="96" y="16" width="8" height="8" fill="#e83a1d"/>
+  <rect x="104" y="16" width="8" height="8" fill="#cc2200"/>
+
+  <!-- Eyes row — button eyes -->
+  <rect x="8" y="24" width="8" height="8" fill="#cc2200"/>
+  <rect x="16" y="24" width="8" height="8" fill="#e83a1d"/>
+  <rect x="24" y="24" width="8" height="8" fill="#f5c6a0"/>
+  <rect x="32" y="24" width="8" height="8" fill="#1a1a1a"/>
+  <rect x="40" y="24" width="8" height="8" fill="#333333"/>
+  <rect x="48" y="24" width="8" height="8" fill="#f5c6a0"/>
+  <rect x="56" y="24" width="8" height="8" fill="#f5c6a0"/>
+  <rect x="64" y="24" width="8" height="8" fill="#f5c6a0"/>
+  <rect x="72" y="24" width="8" height="8" fill="#333333"/>
+  <rect x="80" y="24" width="8" height="8" fill="#1a1a1a"/>
+  <rect x="88" y="24" width="8" height="8" fill="#f5c6a0"/>
+  <rect x="96" y="24" width="8" height="8" fill="#e83a1d"/>
+  <rect x="104" y="24" width="8" height="8" fill="#cc2200"/>
+
+  <!-- Eye shine -->
+  <rect x="32" y="24" width="4" height="4" fill="#555555"/>
+  <rect x="72" y="24" width="4" height="4" fill="#555555"/>
+
+  <!-- Nose + cheeks row -->
+  <rect x="8" y="32" width="8" height="8" fill="#cc2200"/>
+  <rect x="16" y="32" width="8" height="8" fill="#f5c6a0"/>
+  <rect x="24" y="32" width="8" height="8" fill="#f5c6a0"/>
+  <rect x="32" y="32" width="8" height="8" fill="#e88080"/>
+  <rect x="40" y="32" width="8" height="8" fill="#f5c6a0"/>
+  <rect x="48" y="32" width="8" height="8" fill="#f5c6a0"/>
+  <rect x="56" y="32" width="8" height="8" fill="#d4956b"/>
+  <rect x="64" y="32" width="8" height="8" fill="#f5c6a0"/>
+  <rect x="72" y="32" width="8" height="8" fill="#f5c6a0"/>
+  <rect x="80" y="32" width="8" height="8" fill="#e88080"/>
+  <rect x="88" y="32" width="8" height="8" fill="#f5c6a0"/>
+  <rect x="96" y="32" width="8" height="8" fill="#f5c6a0"/>
+  <rect x="104" y="32" width="8" height="8" fill="#cc2200"/>
+
+  <!-- Mouth — triangle smile -->
+  <rect x="16" y="40" width="8" height="8" fill="#cc2200"/>
+  <rect x="24" y="40" width="8" height="8" fill="#f5c6a0"/>
+  <rect x="32" y="40" width="8" height="8" fill="#f5c6a0"/>
+  <rect x="40" y="40" width="8" height="8" fill="#cc3333"/>
+  <rect x="48" y="40" width="8" height="8" fill="#cc3333"/>
+  <rect x="56" y="40" width="8" height="8" fill="#cc3333"/>
+  <rect x="64" y="40" width="8" height="8" fill="#cc3333"/>
+  <rect x="72" y="40" width="8" height="8" fill="#cc3333"/>
+  <rect x="80" y="40" width="8" height="8" fill="#f5c6a0"/>
+  <rect x="88" y="40" width="8" height="8" fill="#f5c6a0"/>
+  <rect x="96" y="40" width="8" height="8" fill="#cc2200"/>
+
+  <!-- Chin -->
+  <rect x="24" y="48" width="8" height="8" fill="#cc2200"/>
+  <rect x="32" y="48" width="8" height="8" fill="#f5c6a0"/>
+  <rect x="40" y="48" width="8" height="8" fill="#f5c6a0"/>
+  <rect x="48" y="48" width="8" height="8" fill="#f5c6a0"/>
+  <rect x="56" y="48" width="8" height="8" fill="#f5c6a0"/>
+  <rect x="64" y="48" width="8" height="8" fill="#f5c6a0"/>
+  <rect x="72" y="48" width="8" height="8" fill="#f5c6a0"/>
+  <rect x="80" y="48" width="8" height="8" fill="#f5c6a0"/>
+  <rect x="88" y="48" width="8" height="8" fill="#cc2200"/>
+
+  <!-- Dress top — blue with white apron -->
+  <rect x="32" y="56" width="8" height="8" fill="#2266cc"/>
+  <rect x="40" y="56" width="8" height="8" fill="#2266cc"/>
+  <rect x="48" y="56" width="8" height="8" fill="#ffffff"/>
+  <rect x="56" y="56" width="8" height="8" fill="#ffffff"/>
+  <rect x="64" y="56" width="8" height="8" fill="#ffffff"/>
+  <rect x="72" y="56" width="8" height="8" fill="#2266cc"/>
+  <rect x="80" y="56" width="8" height="8" fill="#2266cc"/>
+
+  <!-- Arms + apron with heart -->
+  <rect x="16" y="64" width="8" height="8" fill="#f5c6a0"/>
+  <rect x="24" y="64" width="8" height="8" fill="#2266cc"/>
+  <rect x="32" y="64" width="8" height="8" fill="#2266cc"/>
+  <rect x="40" y="64" width="8" height="8" fill="#ffffff"/>
+  <rect x="48" y="64" width="8" height="8" fill="#ffffff"/>
+  <rect x="56" y="64" width="8" height="8" fill="#dd3333"/>
+  <rect x="64" y="64" width="8" height="8" fill="#ffffff"/>
+  <rect x="72" y="64" width="8" height="8" fill="#ffffff"/>
+  <rect x="80" y="64" width="8" height="8" fill="#2266cc"/>
+  <rect x="88" y="64" width="8" height="8" fill="#2266cc"/>
+  <rect x="96" y="64" width="8" height="8" fill="#f5c6a0"/>
+
+  <!-- Dress middle -->
+  <rect x="24" y="72" width="8" height="8" fill="#2266cc"/>
+  <rect x="32" y="72" width="8" height="8" fill="#2266cc"/>
+  <rect x="40" y="72" width="8" height="8" fill="#ffffff"/>
+  <rect x="48" y="72" width="8" height="8" fill="#ffffff"/>
+  <rect x="56" y="72" width="8" height="8" fill="#ffffff"/>
+  <rect x="64" y="72" width="8" height="8" fill="#ffffff"/>
+  <rect x="72" y="72" width="8" height="8" fill="#ffffff"/>
+  <rect x="80" y="72" width="8" height="8" fill="#2266cc"/>
+  <rect x="88" y="72" width="8" height="8" fill="#2266cc"/>
+
+  <!-- Dress lower -->
+  <rect x="24" y="80" width="8" height="8" fill="#2266cc"/>
+  <rect x="32" y="80" width="8" height="8" fill="#2266cc"/>
+  <rect x="40" y="80" width="8" height="8" fill="#2266cc"/>
+  <rect x="48" y="80" width="8" height="8" fill="#ffffff"/>
+  <rect x="56" y="80" width="8" height="8" fill="#ffffff"/>
+  <rect x="64" y="80" width="8" height="8" fill="#ffffff"/>
+  <rect x="72" y="80" width="8" height="8" fill="#2266cc"/>
+  <rect x="80" y="80" width="8" height="8" fill="#2266cc"/>
+  <rect x="88" y="80" width="8" height="8" fill="#2266cc"/>
+
+  <!-- Dress hem -->
+  <rect x="24" y="88" width="8" height="8" fill="#1a55aa"/>
+  <rect x="32" y="88" width="8" height="8" fill="#1a55aa"/>
+  <rect x="40" y="88" width="8" height="8" fill="#1a55aa"/>
+  <rect x="48" y="88" width="8" height="8" fill="#1a55aa"/>
+  <rect x="56" y="88" width="8" height="8" fill="#1a55aa"/>
+  <rect x="64" y="88" width="8" height="8" fill="#1a55aa"/>
+  <rect x="72" y="88" width="8" height="8" fill="#1a55aa"/>
+  <rect x="80" y="88" width="8" height="8" fill="#1a55aa"/>
+  <rect x="88" y="88" width="8" height="8" fill="#1a55aa"/>
+
+  <!-- Striped stockings — red/white candy cane -->
+  <rect x="32" y="96" width="8" height="8" fill="#ffffff"/>
+  <rect x="40" y="96" width="8" height="8" fill="#cc2200"/>
+  <rect x="72" y="96" width="8" height="8" fill="#cc2200"/>
+  <rect x="80" y="96" width="8" height="8" fill="#ffffff"/>
+
+  <rect x="32" y="104" width="8" height="8" fill="#cc2200"/>
+  <rect x="40" y="104" width="8" height="8" fill="#ffffff"/>
+  <rect x="72" y="104" width="8" height="8" fill="#ffffff"/>
+  <rect x="80" y="104" width="8" height="8" fill="#cc2200"/>
+
+  <rect x="32" y="112" width="8" height="8" fill="#ffffff"/>
+  <rect x="40" y="112" width="8" height="8" fill="#cc2200"/>
+  <rect x="72" y="112" width="8" height="8" fill="#cc2200"/>
+  <rect x="80" y="112" width="8" height="8" fill="#ffffff"/>
+
+  <!-- Shoes -->
+  <rect x="24" y="120" width="8" height="8" fill="#1a1a1a"/>
+  <rect x="32" y="120" width="8" height="8" fill="#1a1a1a"/>
+  <rect x="40" y="120" width="8" height="8" fill="#1a1a1a"/>
+  <rect x="72" y="120" width="8" height="8" fill="#1a1a1a"/>
+  <rect x="80" y="120" width="8" height="8" fill="#1a1a1a"/>
+  <rect x="88" y="120" width="8" height="8" fill="#1a1a1a"/>
+</svg>
