@@ -1,5 +1,7 @@
 <p align="center">
   <img src="assets/logo.svg" width="120" alt="RAGdoll">
+  <br>
+  <sub>pixel art inspired by Dangerous Dave + Raggedy Ann</sub>
 </p>
 
 <h1 align="center">RAGdoll</h1>
