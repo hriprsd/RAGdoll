@@ -16,6 +16,21 @@
 
 ---
 
+- [Why RAGdoll?](#why-ragdoll)
+- [How it works](#how-it-works)
+- [Install](#install)
+- [Usage](#usage)
+- [Claude Code integration (MCP)](#claude-code-integration-mcp)
+- [Cursor integration](#cursor-integration)
+- [OpenAI-compatible embeddings endpoint](#openai-compatible-embeddings-endpoint)
+- [Multiple profiles](#multiple-profiles)
+- [Always-on daemon](#always-on-daemon-macos)
+- [Troubleshooting](#troubleshooting)
+- [Stack](#stack)
+- [Deep dive](#deep-dive)
+
+---
+
 ### Why RAGdoll?
 
 Your AI tools already read code, but only the repo you're in, only this session, and they forget everything when you close the tab.
