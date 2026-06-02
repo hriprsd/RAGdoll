@@ -802,6 +802,16 @@ class VectorStore:
                 "SELECT COUNT(*) FROM chunks WHERE repo != ?", (MEMORY_REPO,)
             ).fetchone()[0]
 
+    def chunk_counts_by_file(self) -> dict[str, int]:
+        """Return {source_path: chunk_count} for all indexed files."""
+        with self._conn() as con:
+            rows = con.execute(
+                "SELECT source_path, COUNT(*) FROM chunks "
+                "WHERE repo != ? GROUP BY source_path",
+                (MEMORY_REPO,),
+            ).fetchall()
+            return {r[0]: r[1] for r in rows}
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------

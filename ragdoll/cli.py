@@ -744,6 +744,49 @@ def doctor(
     except Exception:
         pass  # store may not have been opened
 
+    # 8. Partial index check — detect files where chunk count in DB doesn't
+    #    match what the chunker would produce (from a killed/crashed index run)
+    try:
+        from .chunker import chunk_file
+        db_counts = store.chunk_counts_by_file()
+        partial: list[str] = []
+        missing: list[str] = []
+        sampled = 0
+        for source_path, db_count in db_counts.items():
+            p = Path(source_path)
+            if not p.exists():
+                missing.append(source_path)
+                continue
+            # Sample up to 50 files to keep doctor fast
+            if sampled >= 50:
+                break
+            expected = len(chunk_file(p))
+            if expected and db_count != expected:
+                partial.append(f"{p.name} ({db_count}/{expected} chunks)")
+            sampled += 1
+
+        if missing:
+            checks.append((
+                "Deleted files", False,
+                f"{len(missing)} indexed file(s) no longer on disk. "
+                f"Run 'ragdoll forget <path>' or reindex to clean up.",
+            ))
+        elif len(missing) == 0:
+            checks.append(("Deleted files", True, "all indexed files exist on disk"))
+
+        if partial:
+            checks.append((
+                "Partial indexes", False,
+                f"{len(partial)} file(s) have incomplete chunks "
+                f"(likely from a killed index run): {', '.join(partial[:5])}"
+                f"{f' +{len(partial)-5} more' if len(partial) > 5 else ''}. "
+                f"Run 'ragdoll index <repo>' to repair.",
+            ))
+        else:
+            checks.append(("Partial indexes", True, f"checked {sampled} files, all complete"))
+    except Exception as exc:
+        checks.append(("Partial indexes", True, f"check skipped: {exc}"))
+
     # Render
     table = Table(box=box.SIMPLE_HEAVY, title="RAGdoll Doctor")
     table.add_column("Check")
