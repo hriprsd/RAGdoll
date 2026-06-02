@@ -55,6 +55,12 @@ def _detect_providers() -> list[str] | None:
     Returns a provider list for FastEmbed, or None to let it use defaults.
     Detection is best-effort: if onnxruntime isn't importable or a provider
     isn't available, we silently fall back to CPU.
+
+    Note on CoreML: nomic-embed-text-v1.5 uses dynamic shapes with
+    dimension 0 in its rotary embeddings, which CoreML doesn't support.
+    ONNX falls back to a split execution (some ops on CoreML, rest on
+    CPU) that doubles memory usage and is slower than pure CPU. We
+    skip CoreML entirely for embedding models. CUDA works fine.
     """
     try:
         import onnxruntime as ort
@@ -64,15 +70,16 @@ def _detect_providers() -> list[str] | None:
 
     providers: list[str] = []
 
-    # macOS: prefer CoreML (Apple Neural Engine / GPU / CPU via ANE)
-    if "CoreMLExecutionProvider" in available:
-        providers.append("CoreMLExecutionProvider")
-
-    # CUDA for Linux/Windows with NVIDIA GPU
+    # CUDA for Linux/Windows with NVIDIA GPU -- works well with embedding models
     if "CUDAExecutionProvider" in available:
         providers.append("CUDAExecutionProvider")
 
-    # Always include CPU as ultimate fallback
+    # CoreML is intentionally skipped. The nomic/bge embedding models use
+    # dynamic shapes that CoreML can't handle, causing split execution
+    # (half on CoreML, half on CPU) that doubles memory and is slower.
+    # See: https://github.com/microsoft/onnxruntime/issues/16455
+
+    # CPU is the reliable default for embedding models on macOS
     if "CPUExecutionProvider" in available:
         providers.append("CPUExecutionProvider")
 
@@ -142,11 +149,19 @@ class Embedder:
             f"providers={provider_names}, threads={threads}"
         )
 
+        # cuda=False prevents FastEmbed's own auto-detection from picking
+        # up CoreML/CUDA behind our back. We control providers explicitly.
+        has_cuda = providers is not None and any(
+            (p if isinstance(p, str) else p[0]) == "CUDAExecutionProvider"
+            for p in providers
+        )
+
         try:
             model = TextEmbedding(
                 self.model_name,
                 providers=providers,
                 threads=threads,
+                cuda=has_cuda,
             )
             logger.info(f"Loaded embedding model: {self.model_name}")
         except Exception as exc:
@@ -166,6 +181,7 @@ class Embedder:
                     FALLBACK_MODEL,
                     providers=providers,
                     threads=threads,
+                    cuda=has_cuda,
                 )
             except Exception as fallback_exc:
                 raise RuntimeError(
