@@ -279,36 +279,43 @@ class Indexer:
                 f"Index lock acquired, batch_size={BATCH_SIZE}"
             )
 
-            if path.is_file():
-                return self._index_file(path)
+            try:
+                if path.is_file():
+                    return self._index_file(path)
 
-            # Collect indexable files first (with directory pruning)
-            files = list(self._walk_files(path))
-            total = len(files)
+                # Collect indexable files first (with directory pruning)
+                files = list(self._walk_files(path))
+                total = len(files)
 
-            if not files:
-                return 0
+                if not files:
+                    return 0
 
-            # Preload per-chunk hashes AND existing vectors keyed by content hash
-            # in one query each — lets the indexer skip embedding any chunk whose
-            # content is unchanged (even when its *position* in the file shifted).
-            all_hashes = self._store.all_hashes_by_index()
-            all_vectors = self._store.all_vectors_by_hash()
+                # Preload per-chunk hashes AND existing vectors keyed by content hash
+                # in one query each — lets the indexer skip embedding any chunk whose
+                # content is unchanged (even when its *position* in the file shifted).
+                all_hashes = self._store.all_hashes_by_index()
+                all_vectors = self._store.all_vectors_by_hash()
 
-            indexed = 0
-            for i, f in enumerate(files):
-                if self._cancelled:
-                    logger.warning(f"Cancelled — stopped after {i}/{total} files.")
-                    break
-                indexed += self._index_file(
-                    f,
-                    existing_hashes=all_hashes.get(str(f), {}),
-                    existing_vectors=all_vectors.get(str(f), {}),
-                )
-                if progress:
-                    progress(i + 1, total)
+                indexed = 0
+                for i, f in enumerate(files):
+                    if self._cancelled:
+                        logger.warning(f"Cancelled — stopped after {i}/{total} files.")
+                        break
+                    indexed += self._index_file(
+                        f,
+                        existing_hashes=all_hashes.get(str(f), {}),
+                        existing_vectors=all_vectors.get(str(f), {}),
+                    )
+                    if progress:
+                        progress(i + 1, total)
 
-            return indexed
+                return indexed
+            finally:
+                # Release ONNX model memory immediately. Without this,
+                # the model weights (~500 MB) and inference buffers stay
+                # resident until process exit, which is the main cause of
+                # runaway memory after `ragdoll index` completes.
+                self._embedder.unload()
 
     def remove_path(self, path: Path) -> None:
         """Remove all chunks for a deleted file."""

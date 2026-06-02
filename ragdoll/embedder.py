@@ -220,3 +220,21 @@ class Embedder:
     def clear_query_cache(self) -> None:
         """Drop the query-embedding LRU cache (e.g. after a model switch)."""
         self._cached_query.cache_clear()
+
+    def unload(self) -> None:
+        """Release the ONNX model and free memory.
+
+        ONNX Runtime holds C-level allocations (model weights, inference
+        buffers, CoreML/CUDA contexts) that Python's GC won't reclaim.
+        Call this after bulk operations (index) to give memory back to
+        the OS immediately instead of holding it until process exit.
+        """
+        if self._model is not None:
+            # Remove from module-level cache so it doesn't pin the object
+            _model_cache.pop(self.model_name, None)
+            self._model = None
+            self._cached_query.cache_clear()
+            # Force GC to release ONNX session and its C-level buffers
+            import gc
+            gc.collect()
+            logger.debug("Embedding model unloaded, memory released")

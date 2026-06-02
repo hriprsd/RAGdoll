@@ -33,6 +33,10 @@ class _FakeEmbedder:
     model_name = "test/fake-embedder"
     dim = 768
 
+    def unload(self) -> None:
+        """No-op for tests — no ONNX session to release."""
+        pass
+
     def _vectorize(self, text: str) -> list[float]:
         vec = [0.0] * 768
         for word in text.lower().split():
