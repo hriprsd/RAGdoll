@@ -433,7 +433,7 @@ Full explanation with diagrams: [docs/how-it-works.md](docs/how-it-works.md)
 | Vector store | SQLite + sqlite-vec | Single file, no server, inspectable with `sqlite3` |
 | Keyword search | SQLite FTS5 (built-in) | BM25 for exact identifiers, zero extra deps |
 | Search fusion | Reciprocal Rank Fusion | Best of both: semantic + exact |
-| Embeddings | nomic-embed-text-v1.5 via **FastEmbed** | 768-dim, ONNX Runtime on CPU, no PyTorch, no API key |
+| Embeddings | nomic-embed-text-v1.5 via **FastEmbed** | 768-dim, ONNX Runtime (CUDA when available, CPU otherwise), no PyTorch, no API key |
 | Code chunking | AST (Python), regex (TS/JS, Go), heading (Markdown), fallback (line-window) | Smarter splits, better recall |
 | CLI | typer + rich | Clean UX with progress bars |
 | Daemon (optional) | FastAPI + uvicorn | Thin, async, OpenAI-compatible endpoint |
@@ -458,6 +458,31 @@ RAGdoll will never index:
 | **Hidden files** | Dotfiles except `.md`, `.mdx`, `.toml`, `.rst` |
 
 Plus per-project overrides via `.ragdollignore`.
+
+---
+
+## Performance and memory
+
+RAGdoll is designed to run on developer laptops (8-32 GB RAM) without choking your machine.
+
+### Hardware acceleration
+
+| Platform | Provider | Notes |
+|---|---|---|
+| macOS (Apple Silicon) | CPU | CoreML is intentionally skipped -- embedding models use dynamic shapes that force split execution, doubling memory |
+| Linux/Windows + NVIDIA | CUDA | Auto-detected when available |
+| Everything else | CPU | Thread-capped, always works |
+
+### Memory safeguards
+
+| Feature | What it does |
+|---|---|
+| **Adaptive batch size** | Detects system RAM and picks batch size accordingly: 16 (<=8 GB), 32 (8-16 GB), 64 (16-32 GB), 128 (32+ GB). Override with `RAGDOLL_BATCH_SIZE=N` |
+| **Thread cap** | ONNX threads capped at half your CPU cores (min 2), preventing thrash when multiple processes run. Override with `RAGDOLL_THREADS=N` |
+| **Process lock** | File lock at `~/.ragdoll/.index.lock` ensures only one `ragdoll index` process runs ONNX inference at a time. Others queue instead of competing for RAM |
+| **Model unload** | ONNX model and C-level buffers are explicitly released after indexing completes, instead of holding memory until process exit |
+
+Run `ragdoll status` to see your detected configuration (accelerator, threads, batch size).
 
 ---
 
@@ -502,9 +527,9 @@ ragdoll/
 │   ├── cli.py          ← entry point (index / search / serve / mcp / hooks / autostart / doctor)
 │   ├── api.py          ← FastAPI daemon (optional, tool-agnostic HTTP)
 │   ├── mcp_server.py   ← MCP stdio adapter (Claude Code + Cursor)
-│   ├── indexer.py      ← per-chunk incremental, content-anchored vector reuse
+│   ├── indexer.py      ← per-chunk incremental, content-anchored vector reuse, process lock, adaptive batching
 │   ├── chunker.py      ← AST / regex / heading-based splitting
-│   ├── embedder.py     ← FastEmbed ONNX wrapper, lazy load, LRU query cache
+│   ├── embedder.py     ← FastEmbed ONNX wrapper, lazy load, LRU query cache, auto provider detection, model unload
 │   ├── store.py        ← SQLite + sqlite-vec + FTS5, model tracking, dedup
 │   ├── search.py       ← pure utilities: vector packing, FTS query, RRF
 │   └── watcher.py      ← debounced filesystem event handler (daemon only)
