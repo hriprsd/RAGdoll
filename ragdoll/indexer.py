@@ -1,6 +1,13 @@
 """
 Indexer — walks directories, chunks files, embeds, and stores.
 Handles incremental updates by comparing content hashes.
+
+Memory safety:
+  - A file-based lock prevents multiple `ragdoll index` processes from
+    running ONNX inference simultaneously (the main source of OOM on
+    machines with <= 24 GB RAM).
+  - Batch size adapts to available memory: smaller batches on constrained
+    machines, larger on well-provisioned ones.
 """
 
 from __future__ import annotations
@@ -8,6 +15,7 @@ from __future__ import annotations
 import logging
 import os
 import signal
+import time
 from contextlib import contextmanager
 from functools import lru_cache
 from pathlib import Path
@@ -21,12 +29,121 @@ from .store import VectorStore
 
 logger = logging.getLogger(__name__)
 
-# Larger batches let ONNX amortize per-call overhead (graph setup, tensor
-# allocation) across more chunks. 64 is a safe sweet spot on M-series Macs:
-# ~2× faster than 32, still well under the ~200 MB working-set ceiling per
-# batch even with the worst-case 8000-char chunks. Drop this if you see
-# memory pressure on a low-RAM laptop (8 GB or less).
-BATCH_SIZE = 64
+# --- Adaptive batch sizing --------------------------------------------------
+# ONNX working-set per batch is roughly: batch_size * max_chunk_chars * 4 bytes
+# (tokenizer + attention). We pick batch size based on available RAM so a
+# single ragdoll process stays well under pressure, even when the user has
+# Chrome, Cursor, Slack, and Zoom open.
+#
+# Override with RAGDOLL_BATCH_SIZE env var.
+
+_DEFAULT_BATCH_SIZES = {
+    "low":    16,   # <= 8 GB RAM
+    "medium": 32,   # 8-16 GB
+    "high":   64,   # 16-32 GB
+    "ultra":  128,  # > 32 GB
+}
+
+
+def _adaptive_batch_size() -> int:
+    """Pick a batch size based on total system RAM.
+
+    Conservative: we assume the user is running other apps. A single
+    batch of 64 chunks at 8000 chars each uses ~200 MB of ONNX working
+    memory. That's fine on 16+ GB machines but can push a 8 GB machine
+    into swap when combined with editors, browsers, etc.
+    """
+    env = os.environ.get("RAGDOLL_BATCH_SIZE")
+    if env:
+        return int(env)
+
+    try:
+        import platform
+        if platform.system() == "Darwin":
+            # macOS: sysctl is reliable and fast
+            import subprocess
+            out = subprocess.check_output(
+                ["sysctl", "-n", "hw.memsize"],
+                text=True, timeout=2,
+            ).strip()
+            total_bytes = int(out)
+        else:
+            # Linux: /proc/meminfo
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    if line.startswith("MemTotal:"):
+                        total_bytes = int(line.split()[1]) * 1024
+                        break
+                else:
+                    total_bytes = 0
+    except Exception:
+        return _DEFAULT_BATCH_SIZES["medium"]  # safe default
+
+    gb = total_bytes / (1024 ** 3)
+    if gb <= 8:
+        return _DEFAULT_BATCH_SIZES["low"]
+    elif gb <= 16:
+        return _DEFAULT_BATCH_SIZES["medium"]
+    elif gb <= 32:
+        return _DEFAULT_BATCH_SIZES["high"]
+    else:
+        return _DEFAULT_BATCH_SIZES["ultra"]
+
+
+BATCH_SIZE = _adaptive_batch_size()
+
+# --- Process lock ------------------------------------------------------------
+# Prevents multiple `ragdoll index` invocations from loading ONNX models
+# simultaneously. Each ONNX model load allocates ~500 MB; 5 parallel
+# processes = ~2.5 GB just for model weights, plus per-batch working memory.
+# On a 24 GB machine with normal app usage, that's a guaranteed OOM.
+
+_LOCK_PATH = Path(os.environ.get("RAGDOLL_HOME", Path.home() / ".ragdoll")) / ".index.lock"
+
+
+@contextmanager
+def _index_lock(timeout: int = 600):
+    """File-based lock so only one ragdoll index process embeds at a time.
+
+    Other processes wait (with a timeout) rather than competing for RAM.
+    Uses fcntl on Unix. On platforms without fcntl, skips locking (better
+    to risk contention than to crash).
+    """
+    try:
+        import fcntl
+    except ImportError:
+        # Windows or other platform without fcntl -- skip locking
+        yield
+        return
+
+    _LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    lock_fd = None
+    try:
+        lock_fd = open(_LOCK_PATH, "w")
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except (BlockingIOError, OSError):
+                if time.monotonic() > deadline:
+                    logger.warning(
+                        "Timed out waiting for index lock -- another ragdoll "
+                        "index process may be stuck. Proceeding anyway."
+                    )
+                    break
+                logger.info("Another ragdoll index is running -- waiting for lock...")
+                time.sleep(2)
+        yield
+    finally:
+        if lock_fd is not None:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except Exception:
+                pass
+            lock_fd.close()
+
+
 _model_checked = False  # only validate once per process
 
 
@@ -137,6 +254,10 @@ class Indexer:
     ) -> int:
         """Index a file or directory. Returns number of chunks indexed.
 
+        Acquires a file lock so only one ragdoll process runs ONNX
+        inference at a time, preventing parallel OOM on memory-constrained
+        machines.
+
         Args:
             progress: Optional callback(files_done, total_files) for progress reporting.
         """
@@ -153,7 +274,11 @@ class Indexer:
         # per-file too, but doing it here covers the single-file branch.
         path = _canonical_path(path)
 
-        with self._sigint_handler():
+        with _index_lock(), self._sigint_handler():
+            logger.debug(
+                f"Index lock acquired, batch_size={BATCH_SIZE}"
+            )
+
             if path.is_file():
                 return self._index_file(path)
 

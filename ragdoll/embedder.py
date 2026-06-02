@@ -5,13 +5,19 @@ No PyTorch needed. Total dependency footprint: ~50 MB vs ~2 GB with sentence-tra
 
 Default: nomic-ai/nomic-embed-text-v1.5 (768-dim, ONNX, CPU-optimised).
 Fallback: BAAI/bge-base-en-v1.5 (768-dim) — same dimensions, no corruption risk.
+
+Hardware acceleration:
+  - macOS: CoreML (Apple Neural Engine / GPU) when available
+  - Linux/Windows: CUDA when available
+  - Everywhere: CPU fallback with thread count capped to avoid thrashing
 """
 
 from __future__ import annotations
 
 import logging
+import os
 from functools import lru_cache
-from typing import Any
+from typing import Any, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +49,56 @@ EXPECTED_DIM = MODEL_DIMS[DEFAULT_MODEL]
 _model_cache: dict[str, Any] = {}
 
 
+def _detect_providers() -> list[str] | None:
+    """Auto-detect the best ONNX execution providers for this machine.
+
+    Returns a provider list for FastEmbed, or None to let it use defaults.
+    Detection is best-effort: if onnxruntime isn't importable or a provider
+    isn't available, we silently fall back to CPU.
+    """
+    try:
+        import onnxruntime as ort
+        available = set(ort.get_available_providers())
+    except (ImportError, Exception):
+        return None
+
+    providers: list[str] = []
+
+    # macOS: prefer CoreML (Apple Neural Engine / GPU / CPU via ANE)
+    if "CoreMLExecutionProvider" in available:
+        providers.append("CoreMLExecutionProvider")
+
+    # CUDA for Linux/Windows with NVIDIA GPU
+    if "CUDAExecutionProvider" in available:
+        providers.append("CUDAExecutionProvider")
+
+    # Always include CPU as ultimate fallback
+    if "CPUExecutionProvider" in available:
+        providers.append("CPUExecutionProvider")
+
+    return providers if providers else None
+
+
+def _default_threads() -> int | None:
+    """Cap ONNX intra-op threads to avoid thrashing on constrained machines.
+
+    On machines with many cores, ONNX defaults to using all of them. When
+    multiple ragdoll processes run in parallel (e.g. indexing 7 repos at
+    once), each one spawns N threads, causing massive context-switch
+    overhead and memory pressure. We cap at half the available cores,
+    minimum 2, so a single process is still fast but parallel runs don't
+    fight for every core.
+
+    Set RAGDOLL_THREADS to override (0 = let ONNX decide).
+    """
+    env = os.environ.get("RAGDOLL_THREADS")
+    if env is not None:
+        val = int(env)
+        return val if val > 0 else None  # 0 means "no cap"
+    ncpu = os.cpu_count() or 4
+    return max(2, ncpu // 2)
+
+
 class Embedder:
     """Lightweight ONNX-based text embedder via FastEmbed.
 
@@ -58,7 +114,15 @@ class Embedder:
         self._cached_query = lru_cache(maxsize=_QUERY_CACHE_SIZE)(self._embed_query_uncached)
 
     def _load_model(self) -> Any:
-        """Lazy-load the embedding model, with fallback on failure."""
+        """Lazy-load the embedding model, with fallback on failure.
+
+        Automatically selects the best ONNX execution provider:
+          - CoreML on macOS (Apple Neural Engine / GPU)
+          - CUDA on Linux/Windows with NVIDIA GPU
+          - CPU everywhere else
+        Thread count is capped to prevent thrashing when multiple
+        ragdoll processes run in parallel.
+        """
         if self._model is not None:
             return self._model
 
@@ -69,9 +133,21 @@ class Embedder:
 
         from fastembed import TextEmbedding
 
+        providers = _detect_providers()
+        threads = _default_threads()
+
+        provider_names = [p if isinstance(p, str) else p[0] for p in (providers or [])]
+        logger.info(
+            f"Loading embedding model: {self.model_name} (ONNX) "
+            f"providers={provider_names}, threads={threads}"
+        )
+
         try:
-            logger.info(f"Loading embedding model: {self.model_name} (ONNX) ...")
-            model = TextEmbedding(self.model_name)
+            model = TextEmbedding(
+                self.model_name,
+                providers=providers,
+                threads=threads,
+            )
             logger.info(f"Loaded embedding model: {self.model_name}")
         except Exception as exc:
             if self.model_name == FALLBACK_MODEL:
@@ -86,7 +162,11 @@ class Embedder:
             )
             self.model_name = FALLBACK_MODEL
             try:
-                model = TextEmbedding(FALLBACK_MODEL)
+                model = TextEmbedding(
+                    FALLBACK_MODEL,
+                    providers=providers,
+                    threads=threads,
+                )
             except Exception as fallback_exc:
                 raise RuntimeError(
                     f"Failed to load fallback model '{FALLBACK_MODEL}': {fallback_exc}. "

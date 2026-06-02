@@ -31,6 +31,7 @@ class _FakeEmbedder:
     """Produce 768-dim vectors via hashed word counts. Deterministic and fast."""
 
     model_name = "test/fake-embedder"
+    dim = 768
 
     def _vectorize(self, text: str) -> list[float]:
         vec = [0.0] * 768

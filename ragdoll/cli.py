@@ -479,6 +479,16 @@ def status(db: Path = typer.Option(DEFAULT_DB, "--db")):
     table.add_row("Memory notes",     str(len(mems)))
     table.add_row("Embedding model",  "nomic-ai/nomic-embed-text-v1.5 (768-dim, ONNX)")
     table.add_row("Backend",          "FastEmbed (ONNX Runtime)")
+
+    # Hardware acceleration info
+    from .embedder import _detect_providers, _default_threads
+    from .indexer import BATCH_SIZE
+    providers = _detect_providers() or ["CPUExecutionProvider"]
+    provider_names = [p if isinstance(p, str) else p[0] for p in providers]
+    accel = provider_names[0].replace("ExecutionProvider", "")
+    table.add_row("Accelerator",      accel + (" + CPU fallback" if len(provider_names) > 1 else ""))
+    table.add_row("ONNX threads",     str(_default_threads()))
+    table.add_row("Batch size",       str(BATCH_SIZE))
     console.print(table)
 
 
