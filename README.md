@@ -488,7 +488,7 @@ Run `ragdoll status` to see your detected configuration (accelerator, threads, b
 
 ## Troubleshooting
 
-Run `ragdoll doctor` first. It covers DB readability, FTS schema version, embedding model loadability, daemon port, launchd agent status, free disk space, and embedding-dim mismatch.
+Run `ragdoll doctor` first. It covers DB readability, FTS schema version, embedding model loadability, daemon port, launchd agent status, free disk space, embedding-dim mismatch, partial indexes, and deleted files.
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
@@ -502,6 +502,9 @@ Run `ragdoll doctor` first. It covers DB readability, FTS schema version, embedd
 | Hugging Face download fails behind corporate proxy | TLS interception or blocked CDN | Set `HF_HUB_OFFLINE=1` and pre-stage the model files under `~/.cache/fastembed/` |
 | `ragdoll doctor` reports FTS schema mismatch | Upgraded RAGdoll across an FTS schema bump | Open the DB once with any RAGdoll command, auto-migration runs on connect |
 | Want a clean rebuild | Index drifted from disk after a long sleep or mass file moves | `ragdoll reindex` |
+| `ragdoll doctor` reports partial indexes | Index process was killed mid-run (OOM, Ctrl+C, laptop sleep) | `ragdoll index <repo>` -- re-indexing auto-repairs incomplete files |
+| `ragdoll doctor` reports deleted files | Indexed files were moved or deleted from disk | `ragdoll forget <path>` to clean up, or reindex the repo |
+| Search returns irrelevant results for exact values | Exact terms (port numbers, IDs) need keyword match, but the file may not be indexed | Run `ragdoll doctor` to check for partial indexes, then reindex |
 
 ### Backup
 
