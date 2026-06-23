@@ -76,6 +76,15 @@ DB_PATH="$RAGDOLL_DIR/ragdoll.db"
 LOG_DIR="$RAGDOLL_DIR/logs"
 MIN_PYTHON_MINOR=11   # Python 3.11+
 
+# Pin the embedding-model cache to a stable location. FastEmbed otherwise
+# defaults to the OS temp dir (e.g. /var/folders/... on macOS), which the OS
+# purges automatically — leaving a half-downloaded model.onnx and a confusing
+# "NO_SUCHFILE ... model.onnx" crash on the next run. Respect a user override.
+MODEL_CACHE_DIR="${FASTEMBED_CACHE_PATH:-$HOME/.cache/fastembed}"
+# Export for this install session so the prefetch below lands here; the wrapper
+# script and shell rc (further down) make it stick for every future invocation.
+export FASTEMBED_CACHE_PATH="$MODEL_CACHE_DIR"
+
 # Detect repo root (script lives in scripts/, repo root is one level up)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -141,7 +150,7 @@ success "Source checkout looks correct"
 section "Creating RAGdoll directories"
 # =============================================================================
 
-for dir in "$RAGDOLL_DIR" "$LOG_DIR"; do
+for dir in "$RAGDOLL_DIR" "$LOG_DIR" "$MODEL_CACHE_DIR"; do
     if [[ -d "$dir" ]]; then
         log "Directory exists: $dir"
     else
@@ -253,6 +262,9 @@ section "Creating wrapper script"
 
 WRAPPER_CONTENT="#!/usr/bin/env bash
 # RAGdoll wrapper — activates venv and forwards all args
+# Pin the embedding-model cache so it never lands in a purgeable OS temp dir
+# (prevents the half-downloaded-model NO_SUCHFILE crash). User override wins.
+export FASTEMBED_CACHE_PATH=\"\${FASTEMBED_CACHE_PATH:-$MODEL_CACHE_DIR}\"
 exec \"$VENV_DIR/bin/ragdoll\" \"\$@\"
 "
 
@@ -321,6 +333,7 @@ if ! path_contains "$BIN_DIR"; then
                 echo ""
                 echo "# >>> ragdoll install (do not edit) >>>"
                 echo "export PATH=\"$BIN_DIR:\$PATH\""
+                echo "export FASTEMBED_CACHE_PATH=\"\${FASTEMBED_CACHE_PATH:-$MODEL_CACHE_DIR}\""
                 echo "# <<< ragdoll install <<<"
             } >> "$SHELL_RC"
             success "Added to $SHELL_RC — restart your shell or run: source $SHELL_RC"
@@ -352,13 +365,55 @@ section "Optional: prefetch the embedding model (~200 MB)"
 # =============================================================================
 # The first search/index command otherwise blocks 2–5 min downloading from
 # Hugging Face with no progress bar. Doing it here is a much nicer UX.
+
+# Delete any half-finished downloads first. An interrupted fetch leaves a
+# 0-byte "*.incomplete" blob and no model.onnx, which surfaces later as the
+# dreaded "NO_SUCHFILE ... model.onnx ... File doesn't exist" crash. Wiping
+# them forces a clean re-download instead of tripping over the corpse.
+clean_partial_downloads() {
+    [[ -d "$MODEL_CACHE_DIR" ]] || return 0
+    find "$MODEL_CACHE_DIR" -name '*.incomplete' -type f -delete 2>/dev/null || true
+}
+
+# Download in the background and reuse the shared spinner so the user sees
+# progress instead of a multi-minute hang — and so a failure shows a friendly
+# message rather than a raw Python traceback.
+prefetch_model() {
+    PREFETCH_LOG="$(mktemp -t ragdoll-prefetch.XXXXXX)"
+    "$VENV_PYTHON" -c "from ragdoll.embedder import Embedder; Embedder()._load_model()" \
+        > "$PREFETCH_LOG" 2>&1 &
+    spinner "$!" "$PREFETCH_LOG"
+}
+
 ask "Download the embedding model now? [y/N]" prefetch
 if [[ "$(lower "$prefetch")" == "y" ]]; then
-    log "Fetching nomic-embed-text-v1.5 (this may take a few minutes)..."
-    if "$VENV_PYTHON" -c "from ragdoll.embedder import Embedder; Embedder()._load_model()"; then
-        success "Model cached (~/.cache/fastembed/)"
+    log "Fetching nomic-embed-text-v1.5 into $MODEL_CACHE_DIR (this may take a few minutes)..."
+    clean_partial_downloads
+    if prefetch_model; then
+        success "Model cached ($MODEL_CACHE_DIR)"
+        rm -f "${PREFETCH_LOG:-}"
     else
-        warn "Model prefetch failed — will retry on first search/index."
+        warn "Download didn't complete — clearing the partial file and retrying once..."
+        clean_partial_downloads
+        if prefetch_model; then
+            success "Model cached on retry ($MODEL_CACHE_DIR)"
+            rm -f "${PREFETCH_LOG:-}"
+        else
+            error "Model prefetch failed twice."
+            echo ""
+            echo "  This is almost always the network blocking Hugging Face's model CDN"
+            echo "  (corporate proxy / VPN / firewall): the small config files download but"
+            echo "  the large model.onnx gets truncated. Options, then re-run the installer"
+            echo "  or just run 'ragdoll index':"
+            echo ""
+            echo -e "    ${BOLD}export HF_ENDPOINT=https://hf-mirror.com${RESET}    # use a mirror"
+            echo -e "    ${BOLD}export HTTPS_PROXY=<your-corp-proxy>${RESET}       # if behind a proxy"
+            echo ""
+            echo "  Last lines of the attempt:"
+            tail -n 8 "${PREFETCH_LOG:-/dev/null}" 2>/dev/null | sed 's/^/    /' || true
+            rm -f "${PREFETCH_LOG:-}"
+            warn "Skipping for now — RAGdoll will retry automatically on first search/index."
+        fi
     fi
 else
     log "Skipping prefetch — model will download on first use."
