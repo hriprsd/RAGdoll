@@ -47,6 +47,16 @@ EMBED_DIM = 768  # nomic-embed-text-v1.5 / bge-base-en-v1.5 (fallback)
 FTS_SCHEMA_VERSION = "2"  # v2: porter stemmer for better prose recall
 FTS_TOKENIZE = "porter unicode61 remove_diacritics 1"
 
+# Distance metric for the sqlite-vec table. cosine is magnitude-invariant, so
+# ranking stays correct even for vectors that aren't perfectly unit-length.
+# sqlite-vec defaults to L2, which only ranks correctly on normalized vectors —
+# a silent footgun that produced garbage results on unnormalized embeddings.
+VEC_DISTANCE_METRIC = "cosine"
+# Bump when the vec0 table definition changes (e.g. distance metric). Vectors
+# live only in vec_chunks and can't be backfilled from the chunks table, so a
+# bump forces a rebuild and requires `ragdoll reindex` to re-embed.
+VEC_SCHEMA_VERSION = "2"  # v2: cosine distance metric + unit-normalized vectors
+
 MEMORY_REPO   = "ragdoll://memory"
 MEMORY_PREFIX = "ragdoll://memory/"
 
@@ -69,9 +79,17 @@ class RepoSummary(BaseModel):
 
 
 class VectorStore:
-    def __init__(self, db_path: Path):
+    def __init__(self, db_path: Path, dim: int = EMBED_DIM):
+        """Open (creating if needed) the vector store at `db_path`.
+
+        `dim` is the embedding dimension the vec0 table is built with. It
+        defaults to 768 (nomic / bge-base) so existing callers are unaffected;
+        the CLI passes 384 for `--fast` (bge-small) into its separate
+        ragdoll-fast.db so the two dimensions never share a table.
+        """
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self.db_path = db_path
+        self._dim = dim
         self._init_db()
         self._migrate_db()
 
@@ -123,7 +141,7 @@ class VectorStore:
 
                 CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks USING vec0(
                     id     TEXT PRIMARY KEY,
-                    vector float[{EMBED_DIM}]
+                    vector float[{self._dim}] distance_metric={VEC_DISTANCE_METRIC}
                 );
 
                 CREATE VIRTUAL TABLE IF NOT EXISTS fts_chunks USING fts5(
@@ -187,6 +205,35 @@ class VectorStore:
                     ("fts_schema_version", FTS_SCHEMA_VERSION),
                 )
 
+            # 5. If the vec schema changed (e.g. distance metric), recreate the
+            # vec table. Vectors live only here and can't be backfilled from the
+            # chunks table, so this empties them — the user must run
+            # `ragdoll reindex` to re-embed. Recreate eagerly so any new writes
+            # land in a correctly-configured (cosine) table.
+            stored_vec_version = con.execute(
+                "SELECT value FROM ragdoll_meta WHERE key = 'vec_schema_version'"
+            ).fetchone()
+            vec_version = stored_vec_version[0] if stored_vec_version else None
+            if vec_version != VEC_SCHEMA_VERSION:
+                vec_count = con.execute("SELECT COUNT(*) FROM vec_chunks").fetchone()[0]
+                con.execute("DROP TABLE IF EXISTS vec_chunks")
+                con.execute(f"""
+                    CREATE VIRTUAL TABLE vec_chunks USING vec0(
+                        id     TEXT PRIMARY KEY,
+                        vector float[{self._dim}] distance_metric={VEC_DISTANCE_METRIC}
+                    )
+                """)
+                con.execute(
+                    "INSERT OR REPLACE INTO ragdoll_meta(key, value) VALUES (?, ?)",
+                    ("vec_schema_version", VEC_SCHEMA_VERSION),
+                )
+                if vec_count > 0:
+                    logger.warning(
+                        f"Vector index rebuilt for schema v{vec_version} -> "
+                        f"v{VEC_SCHEMA_VERSION} ({vec_count} vectors dropped). "
+                        f"Run `ragdoll reindex` to re-embed your repos."
+                    )
+
     # ------------------------------------------------------------------
     # Model version tracking
     # ------------------------------------------------------------------
@@ -217,8 +264,10 @@ class VectorStore:
         stored_model = self.get_meta("embed_model")
         stored_dim = self.get_meta("embed_dim")
 
-        if stored_model is None:
-            # First time — record it
+        if not stored_model:
+            # First use, or cleared by `reindex` (which blanks these to "").
+            # Treat empty/None alike, otherwise the blanked value never gets
+            # re-recorded and check_embed_model warns "mismatch" on every run.
             self.set_meta("embed_model", model_name)
             self.set_meta("embed_dim", str(dim))
             return

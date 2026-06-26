@@ -14,9 +14,12 @@ from __future__ import annotations
 
 import logging
 import os
+import queue
 import signal
+import threading
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import Callable, Optional
@@ -91,6 +94,25 @@ def _adaptive_batch_size() -> int:
 
 
 BATCH_SIZE = _adaptive_batch_size()
+
+# Pipeline tuning (directory indexing). A producer thread reads + chunks files
+# (disk I/O + CPU) while the main thread embeds (ONNX releases the GIL during
+# inference) and writes to SQLite. Chunks are batched across files so the model
+# always gets full batches instead of one underfull batch per small file.
+#   - PLAN_QUEUE_MAX: how many planned files may wait ahead of the embedder.
+#     Bounded so a fast producer can't read the whole repo into RAM.
+#   - ROW_FLUSH: upsert staged rows once this many accumulate (keeps the write
+#     amortised and memory flat).
+PLAN_QUEUE_MAX = int(os.environ.get("RAGDOLL_PLAN_QUEUE", 16))
+ROW_FLUSH = int(os.environ.get("RAGDOLL_ROW_FLUSH", 512))
+
+# How many pending chunks to accumulate before handing them to the embedder.
+# The embedder length-sorts each call to minimise padding waste (onnxruntime
+# pads every sequence in a batch to the longest), so a bigger pool means each
+# padded sub-batch is tighter. Buffering chunks is cheap (~700 chars each), the
+# producer keeps refilling it, so a window well above BATCH_SIZE is a free win.
+# Tunable via RAGDOLL_EMBED_WINDOW.
+EMBED_WINDOW = int(os.environ.get("RAGDOLL_EMBED_WINDOW", max(BATCH_SIZE * 8, 1024)))
 
 # --- Process lock ------------------------------------------------------------
 # Prevents multiple `ragdoll index` invocations from loading ONNX models
@@ -195,6 +217,21 @@ def _find_repo_root(path: Path) -> str:
         return str(path)
 
 
+@dataclass
+class FilePlan:
+    """Result of planning one file: what to prune, reuse, and embed.
+
+    Produced without touching the DB or the embedder, so it can be built on a
+    background thread while the main thread embeds the previous batch.
+    """
+    path: Path
+    repo: str
+    raw_count: int
+    reused: list = field(default_factory=list)      # (idx, rc, hash, vector)
+    to_embed: list = field(default_factory=list)    # (idx, rc, hash)
+    removed: list = field(default_factory=list)      # chunk indices to delete
+
+
 class Indexer:
     def __init__(self, store: VectorStore, embedder: Embedder):
         self._store = store
@@ -296,26 +333,116 @@ class Indexer:
                 all_hashes = self._store.all_hashes_by_index()
                 all_vectors = self._store.all_vectors_by_hash()
 
-                indexed = 0
-                for i, f in enumerate(files):
-                    if self._cancelled:
-                        logger.warning(f"Cancelled — stopped after {i}/{total} files.")
-                        break
-                    indexed += self._index_file(
-                        f,
-                        existing_hashes=all_hashes.get(str(f), {}),
-                        existing_vectors=all_vectors.get(str(f), {}),
-                    )
-                    if progress:
-                        progress(i + 1, total)
-
-                return indexed
+                return self._index_dir(files, total, all_hashes, all_vectors, progress)
             finally:
                 # Release ONNX model memory immediately. Without this,
                 # the model weights (~500 MB) and inference buffers stay
                 # resident until process exit, which is the main cause of
                 # runaway memory after `ragdoll index` completes.
                 self._embedder.unload()
+
+    def _index_dir(self, files, total, all_hashes, all_vectors, progress) -> int:
+        """Index a directory's files with a read/embed/write pipeline.
+
+        A background thread reads + chunks + plans files (disk I/O + CPU, no DB,
+        no embedding). This thread embeds (onnxruntime releases the GIL during
+        inference, so planning genuinely overlaps it) and does all DB writes —
+        keeping SQLite single-threaded. Chunks are batched across files so the
+        model always gets full batches instead of one underfull batch per file.
+        """
+        SENTINEL = object()
+        plan_q: queue.Queue = queue.Queue(maxsize=PLAN_QUEUE_MAX)
+
+        def produce():
+            try:
+                for f in files:
+                    if self._cancelled:
+                        break
+                    plan = self._plan_file(
+                        f,
+                        all_hashes.get(str(f), {}),
+                        all_vectors.get(str(f), {}),
+                    )
+                    plan_q.put((f, plan))
+            except Exception as exc:  # surface to the consumer, don't die silently
+                plan_q.put(exc)
+            finally:
+                plan_q.put(SENTINEL)
+
+        producer = threading.Thread(
+            target=produce, name="ragdoll-planner", daemon=True
+        )
+        producer.start()
+
+        staged_rows: list[dict] = []
+        embed_buf: list = []  # (path, repo, idx, rc, hash)
+        indexed = 0
+        files_done = 0
+
+        def flush_embed() -> None:
+            nonlocal indexed
+            if not embed_buf:
+                return
+            vectors = self._embedder.embed([rc.content for (_, _, _, rc, _) in embed_buf])
+            for (p_, repo_, idx_, rc_, h_), vec in zip(embed_buf, vectors):
+                staged_rows.append(self._row(p_, repo_, idx_, rc_, h_, vec))
+            indexed += len(embed_buf)
+            embed_buf.clear()
+
+        def flush_rows() -> None:
+            if staged_rows:
+                self._store.upsert(staged_rows)
+                staged_rows.clear()
+
+        try:
+            while True:
+                item = plan_q.get()
+                if item is SENTINEL:
+                    break
+                if isinstance(item, Exception):
+                    raise item
+
+                f, plan = item
+                files_done += 1
+                if plan is not None:
+                    if plan.removed:
+                        self._store.delete_chunks_by_index(str(f), plan.removed)
+                    for (idx, rc, h, vec) in plan.reused:
+                        staged_rows.append(self._row(f, plan.repo, idx, rc, h, vec))
+                        indexed += 1
+                    for (idx, rc, h) in plan.to_embed:
+                        embed_buf.append((f, plan.repo, idx, rc, h))
+                    if len(embed_buf) >= EMBED_WINDOW:
+                        flush_embed()
+                    if len(staged_rows) >= ROW_FLUSH:
+                        flush_rows()
+
+                if progress:
+                    progress(files_done, total)
+
+                if self._cancelled:
+                    logger.warning(
+                        f"Cancelled — stopped after {files_done}/{total} files."
+                    )
+                    break
+
+            # Commit whatever's been planned/embedded so far
+            flush_embed()
+            flush_rows()
+        finally:
+            if self._cancelled:
+                # We stopped early; a producer parked on a full queue would
+                # deadlock the join. Drain until its sentinel to free it.
+                while True:
+                    try:
+                        leftover = plan_q.get(timeout=10)
+                    except queue.Empty:
+                        break
+                    if leftover is SENTINEL:
+                        break
+            producer.join(timeout=5)
+
+        return indexed
 
     def remove_path(self, path: Path) -> None:
         """Remove all chunks for a deleted file."""
@@ -342,13 +469,14 @@ class Indexer:
                 # creating a duplicate set.
                 yield _canonical_path(fpath)
 
-    def _index_file(
+    def _plan_file(
         self,
         path: Path,
-        existing_hashes: dict[int, str] | None = None,
-        existing_vectors: dict[str, list[float]] | None = None,
-    ) -> int:
-        """Index a single file, reusing unchanged chunks.
+        existing_hashes: dict[int, str],
+        existing_vectors: dict[str, list[float]],
+    ) -> FilePlan | None:
+        """Chunk a file and decide what to prune / reuse / embed — no DB writes,
+        no embedding. Safe to run on a background thread.
 
         Two-tier reuse, in order of preference:
 
@@ -363,18 +491,11 @@ class Indexer:
         """
         raw_chunks = chunk_file(path)
         if not raw_chunks:
-            return 0
+            return None
 
         repo = _find_repo_root(path.parent)
-
-        if existing_hashes is None:
-            existing_hashes = self._store.hashes_by_index(str(path))
-        if existing_vectors is None:
-            existing_vectors = self._store.vectors_by_hash(str(path))
-
-        # Partition chunks: unchanged-at-position / reusable / needs-embedding
-        reused: list[tuple[int, object, str, list[float]]] = []
-        to_embed: list[tuple[int, object, str]] = []
+        reused: list = []
+        to_embed: list = []
         for idx, rc in enumerate(raw_chunks):
             new_hash = VectorStore.content_hash(rc.content)
             if existing_hashes.get(idx) == new_hash:
@@ -385,63 +506,67 @@ class Indexer:
             else:
                 to_embed.append((idx, rc, new_hash))
 
-        # Prune any chunks beyond the new file length
-        removed_indices = [
-            idx for idx in existing_hashes if idx >= len(raw_chunks)
+        removed = [idx for idx in existing_hashes if idx >= len(raw_chunks)]
+        return FilePlan(
+            path=path, repo=repo, raw_count=len(raw_chunks),
+            reused=reused, to_embed=to_embed, removed=removed,
+        )
+
+    @staticmethod
+    def _row(path: Path, repo: str, idx: int, rc, content_hash: str, vector) -> dict:
+        """Build a chunk row dict for the store."""
+        return {
+            "id": VectorStore.chunk_id(str(path), idx),
+            "content": rc.content,
+            "content_hash": content_hash,
+            "source_path": str(path),
+            "repo": repo,
+            "language": rc.language,
+            "chunk_index": idx,
+            "start_line": rc.start_line,
+            "end_line": rc.end_line,
+            "vector": vector,
+        }
+
+    def _index_file(
+        self,
+        path: Path,
+        existing_hashes: dict[int, str] | None = None,
+        existing_vectors: dict[str, list[float]] | None = None,
+    ) -> int:
+        """Index a single file, reusing unchanged chunks.
+
+        Used for the single-file path; directory indexing uses the pipelined
+        path in `_index_dir`. Shares chunking/partition logic via `_plan_file`.
+        """
+        if existing_hashes is None:
+            existing_hashes = self._store.hashes_by_index(str(path))
+        if existing_vectors is None:
+            existing_vectors = self._store.vectors_by_hash(str(path))
+
+        plan = self._plan_file(path, existing_hashes, existing_vectors)
+        if plan is None:
+            return 0
+        if plan.removed:
+            self._store.delete_chunks_by_index(str(path), plan.removed)
+        if not plan.reused and not plan.to_embed:
+            return 0
+
+        rows = [
+            self._row(path, plan.repo, idx, rc, h, vec)
+            for (idx, rc, h, vec) in plan.reused
         ]
-        if removed_indices:
-            self._store.delete_chunks_by_index(str(path), removed_indices)
-
-        if not reused and not to_embed:
-            return 0  # nothing changed at the chunk level
-
-        all_chunks: list[dict] = []
-
-        # Rows we can rewrite without embedding — vector comes from the DB
-        for idx, rc, new_hash, vec in reused:
-            all_chunks.append({
-                "id": VectorStore.chunk_id(str(path), idx),
-                "content": rc.content,
-                "content_hash": new_hash,
-                "source_path": str(path),
-                "repo": repo,
-                "language": rc.language,
-                "chunk_index": idx,
-                "start_line": rc.start_line,
-                "end_line": rc.end_line,
-                "vector": vec,
-            })
-
-        # Genuine new content — batch through the embedder
-        for batch_start in range(0, len(to_embed), BATCH_SIZE):
+        embedded = 0
+        for start in range(0, len(plan.to_embed), BATCH_SIZE):
             if self._cancelled:
                 # Don't start another (multi-second) embed batch after Ctrl+C.
-                # Whatever we already embedded for this file will be upserted
-                # below; partially-indexed files are fine because each chunk
-                # row is independent.
-                to_embed = to_embed[:batch_start]
+                # Partially-indexed files are fine — each chunk row is independent.
                 break
-            batch = to_embed[batch_start : batch_start + BATCH_SIZE]
-            texts = [rc.content for _, rc, _ in batch]
-            vectors = self._embedder.embed(texts)
-            for (idx, rc, new_hash), vec in zip(batch, vectors):
-                all_chunks.append({
-                    "id": VectorStore.chunk_id(str(path), idx),
-                    "content": rc.content,
-                    "content_hash": new_hash,
-                    "source_path": str(path),
-                    "repo": repo,
-                    "language": rc.language,
-                    "chunk_index": idx,
-                    "start_line": rc.start_line,
-                    "end_line": rc.end_line,
-                    "vector": vec,
-                })
+            batch = plan.to_embed[start : start + BATCH_SIZE]
+            vectors = self._embedder.embed([rc.content for (_, rc, _) in batch])
+            for (idx, rc, h), vec in zip(batch, vectors):
+                rows.append(self._row(path, plan.repo, idx, rc, h, vec))
+            embedded += len(batch)
 
-        self._store.upsert(all_chunks)
-        logger.debug(
-            f"Indexed {len(raw_chunks)} chunks from {path} "
-            f"(embedded {len(to_embed)}, reused {len(reused)}, "
-            f"unchanged {len(raw_chunks) - len(reused) - len(to_embed)})"
-        )
-        return len(to_embed) + len(reused)
+        self._store.upsert(rows)
+        return len(plan.reused) + embedded

@@ -70,14 +70,43 @@ DEFAULT_DB   = _default_db()
 DEFAULT_PORT = 7474
 
 
-def _build_stack(db_path: Path):
+def _resolve_db(db: Optional[Path]) -> Path:
+    """Resolve the DB path for a command.
+
+    An explicit `--db` always wins. Otherwise fall back to DEFAULT_DB, which the
+    top-level `--fast` callback has already pointed at the 384-dim fast store or
+    the 768-dim default store. Commands bind `--db` with a None default (instead
+    of capturing DEFAULT_DB at import time) so this runtime resolution sees the
+    post-callback value — otherwise `--fast` would silently write fast-model
+    vectors into the default store.
+    """
+    return db if db is not None else DEFAULT_DB
+
+
+def _active_model_dim() -> int:
+    """Embedding dimension for the active model (384 in --fast, else 768).
+
+    A plain dict lookup — does not load the model — so it's cheap to call when
+    opening a store for read-only commands.
+    """
+    from .embedder import DEFAULT_MODEL, FAST_MODEL, MODEL_DIMS
+    return MODEL_DIMS[FAST_MODEL if _FAST_MODE else DEFAULT_MODEL]
+
+
+def _open_store(db: Optional[Path]):
+    """Open the vector store at the resolved DB path (honours --fast/--db)."""
+    from .store import VectorStore
+    return VectorStore(_resolve_db(db), dim=_active_model_dim())
+
+
+def _build_stack(db_path: Optional[Path]):
     from .embedder import Embedder, DEFAULT_MODEL, FAST_MODEL
     from .indexer import Indexer
     from .store import VectorStore
 
     model = FAST_MODEL if _FAST_MODE else DEFAULT_MODEL
-    store    = VectorStore(db_path)
     embedder = Embedder(model_name=model)
+    store    = VectorStore(_resolve_db(db_path), dim=embedder.dim)
     indexer  = Indexer(store, embedder)
     return store, embedder, indexer
 
@@ -95,7 +124,7 @@ def _root(
     global _FAST_MODE, DEFAULT_DB
     _FAST_MODE = fast
     # Re-resolve the default DB path now that we know whether fast is on.
-    # Subcommands using `db: Path = typer.Option(DEFAULT_DB, ...)` capture the
+    # Subcommands using `db: Path = typer.Option(None, ...)` capture the
     # value at import time, so we also update the typer default *and* let
     # _build_stack pick it up via _default_db() if a command opts in.
     DEFAULT_DB = _default_db(fast=fast)
@@ -120,20 +149,37 @@ def _relative_time(iso: Optional[str]) -> str:
 # index
 # ---------------------------------------------------------------------------
 
+def _ascii_bar(done: int, total: int, width: int = 32) -> str:
+    """A plain ASCII progress bar for terminals that can't render rich output."""
+    pct = (done / total) if total else 0.0
+    filled = int(width * pct)
+    return f"[{'#' * filled}{'.' * (width - filled)}] {done}/{total} ({pct * 100:3.0f}%)"
+
+
 @app.command()
 def index(
     path: Path = typer.Argument(..., help="File or directory to index"),
-    db:   Path = typer.Option(DEFAULT_DB, "--db", help="Path to SQLite DB"),
+    db:   Path = typer.Option(None, "--db", help="Path to SQLite DB"),
 ):
-    """Index a file or directory into the local vector store."""
+    """Index a file or directory into the local vector store.
+
+    Progress display honours RAGDOLL_PROGRESS: auto (default — rich bar on a
+    real terminal, ASCII bar otherwise), rich, plain (force ASCII), or none.
+    """
     p = path.expanduser().resolve()
     if not p.exists():
         console.print(f"[red]Path not found: {p}[/red]")
         raise typer.Exit(1)
     store, embedder, indexer = _build_stack(db)
 
+    progress_mode = os.environ.get("RAGDOLL_PROGRESS", "auto").lower()
+    use_rich = progress_mode == "rich" or (
+        progress_mode == "auto" and console.is_terminal
+    )
+    show_progress = progress_mode != "none"
+
     try:
-        if p.is_dir():
+        if p.is_dir() and use_rich:
             with Progress(
                 SpinnerColumn(),
                 TextColumn("[progress.description]{task.description}"),
@@ -147,6 +193,30 @@ def index(
                     progress.update(task, total=total, completed=done)
 
                 n = indexer.index_path(p, progress=on_progress)
+        elif p.is_dir():
+            # Plain ASCII bar for terminals that don't render rich's live bar
+            # (pipes, captured/agent shells, dumb terminals). Throttled so it
+            # stays cheap; uses \r to update in place where supported.
+            from time import monotonic
+
+            on_progress = None
+            if show_progress:
+                print(f"Indexing {p.name} ...", flush=True)
+                state = {"last": 0.0}
+
+                def on_progress(done: int, total: int) -> None:  # noqa: F811
+                    now = monotonic()
+                    if not total:
+                        return
+                    if done >= total or now - state["last"] >= 0.5:
+                        state["last"] = now
+                        print(
+                            f"\r{_ascii_bar(done, total)}", end="", flush=True
+                        )
+                        if done >= total:
+                            print()
+
+            n = indexer.index_path(p, progress=on_progress)
         else:
             console.print(f"Indexing [bold]{p}[/bold] ...")
             n = indexer.index_path(p)
@@ -169,7 +239,7 @@ def index(
 
 @app.command()
 def dedupe(
-    db: Path = typer.Option(DEFAULT_DB, "--db", help="Path to SQLite DB"),
+    db: Path = typer.Option(None, "--db", help="Path to SQLite DB"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Report only, don't delete"),
 ):
     """Remove duplicate-casing chunk rows (e.g. /RAGdoll vs /ragdoll on macOS).
@@ -184,6 +254,7 @@ def dedupe(
     import sqlite3 as _sql
     from .indexer import _canonical_path
 
+    db = _resolve_db(db)
     con = _sql.connect(db)
     paths = [r[0] for r in con.execute("SELECT DISTINCT source_path FROM chunks")]
 
@@ -242,7 +313,7 @@ def search(
                                 help="Search mode: hybrid | vector | bm25"),
     no_mem:  bool          = typer.Option(False, "--no-memories",
                                 help="Exclude memory notes from results"),
-    db:      Path          = typer.Option(DEFAULT_DB, "--db"),
+    db:      Path          = typer.Option(None, "--db"),
 ):
     """
     Semantic + keyword search over your indexed code and notes.
@@ -294,7 +365,7 @@ def explain(
     query: str           = typer.Argument(..., help="Query to debug"),
     top_k: int           = typer.Option(8, "--top-k", "-k"),
     repo:  Optional[str] = typer.Option(None, "--repo", "-r"),
-    db:    Path          = typer.Option(DEFAULT_DB, "--db"),
+    db:    Path          = typer.Option(None, "--db"),
 ):
     """
     Show per-result scoring breakdown for a hybrid search.
@@ -345,12 +416,12 @@ def explain(
 @app.command()
 def forget(
     path: str  = typer.Argument(..., help="File, directory, or memory ID to remove"),
-    db:   Path = typer.Option(DEFAULT_DB, "--db"),
+    db:   Path = typer.Option(None, "--db"),
 ):
     """Remove a file, directory, or memory note from the index."""
     from .store import VectorStore, MEMORY_PREFIX
 
-    store = VectorStore(db)
+    store = _open_store(db)
 
     # Memory note
     if path.startswith(MEMORY_PREFIX) or (len(path) == 16 and all(c in "0123456789abcdef" for c in path)):
@@ -377,12 +448,12 @@ def forget(
 
 @app.command(name="list")
 def list_repos(
-    db: Path = typer.Option(DEFAULT_DB, "--db"),
+    db: Path = typer.Option(None, "--db"),
 ):
     """List all indexed repos with chunk counts and last-indexed time."""
     from .store import VectorStore
 
-    store = VectorStore(db)
+    store = _open_store(db)
     repos = store.list_repos()
 
     if not repos:
@@ -423,11 +494,11 @@ def _is_stale(iso: Optional[str], threshold_days: int = 7) -> bool:
 # ---------------------------------------------------------------------------
 
 @app.command()
-def stats(db: Path = typer.Option(DEFAULT_DB, "--db")):
+def stats(db: Path = typer.Option(None, "--db")):
     """Detailed breakdown of the index by repo and language."""
     from .store import VectorStore
 
-    store = VectorStore(db)
+    store = _open_store(db)
     rows  = store.stats_breakdown()
 
     if not rows:
@@ -459,11 +530,12 @@ def stats(db: Path = typer.Option(DEFAULT_DB, "--db")):
 # ---------------------------------------------------------------------------
 
 @app.command()
-def status(db: Path = typer.Option(DEFAULT_DB, "--db")):
+def status(db: Path = typer.Option(None, "--db")):
     """Quick health check — DB size, repos, chunks, and embedding model."""
     from .store import VectorStore
 
-    store = VectorStore(db)
+    db = _resolve_db(db)
+    store = _open_store(db)
     repos = store.list_repos()
     mems = store.list_memories()
 
@@ -501,7 +573,7 @@ def remember(
     note: str            = typer.Argument(..., help="The note to store"),
     tags: Optional[str]  = typer.Option(None, "--tags", "-t",
                                help="Comma-separated tags, e.g. 'auth,decisions'"),
-    db:   Path           = typer.Option(DEFAULT_DB, "--db"),
+    db:   Path           = typer.Option(None, "--db"),
 ):
     """
     Store a free-text memory note, searchable alongside your code.
@@ -518,11 +590,11 @@ def remember(
 
 
 @app.command()
-def memories(db: Path = typer.Option(DEFAULT_DB, "--db")):
+def memories(db: Path = typer.Option(None, "--db")):
     """List all stored memory notes."""
     from .store import VectorStore, MEMORY_PREFIX
 
-    store = VectorStore(db)
+    store = _open_store(db)
     mems  = store.list_memories()
 
     if not mems:
@@ -549,7 +621,7 @@ def context(
     mode:     str          = typer.Option("hybrid", "--mode", "-m"),
     repo:     Optional[str]= typer.Option(None, "--repo", "-r"),
     no_mem:   bool         = typer.Option(False, "--no-memories"),
-    db:       Path         = typer.Option(DEFAULT_DB, "--db"),
+    db:       Path         = typer.Option(None, "--db"),
 ):
     """
     Pack the most relevant chunks into a single context block within a token budget.
@@ -630,7 +702,7 @@ def context(
 
 @app.command()
 def doctor(
-    db:   Path = typer.Option(DEFAULT_DB, "--db"),
+    db:   Path = typer.Option(None, "--db"),
     port: int  = typer.Option(DEFAULT_PORT, "--port", "-p"),
 ):
     """
@@ -649,6 +721,7 @@ def doctor(
 
     checks: list[tuple[str, bool, str]] = []  # (label, ok, detail)
 
+    db = _resolve_db(db)
     # 1. DB path
     if db.exists():
         size_mb = db.stat().st_size / 1_048_576
@@ -658,7 +731,7 @@ def doctor(
 
     # 2. DB readable + FTS version
     try:
-        store = VectorStore(db)
+        store = _open_store(db)
         chunks = store.count()
         fts_v = store.get_meta("fts_schema_version")
         if fts_v == FTS_SCHEMA_VERSION:
@@ -731,7 +804,7 @@ def doctor(
 
     # 7. Embedding dim recorded vs expected
     try:
-        expected = embedder.dim
+        expected = _active_model_dim()
         recorded = store.get_meta("embed_dim")
         if recorded and int(recorded) != expected:
             checks.append((
@@ -809,7 +882,7 @@ def doctor(
 
 @app.command()
 def reindex(
-    db: Path = typer.Option(DEFAULT_DB, "--db"),
+    db: Path = typer.Option(None, "--db"),
 ):
     """
     Re-embed all indexed chunks with the current model.
@@ -819,7 +892,7 @@ def reindex(
     """
     from .store import VectorStore, MEMORY_REPO
 
-    store = VectorStore(db)
+    store = _open_store(db)
     repos = store.list_repos()
     if not repos:
         console.print("[yellow]Nothing to reindex.[/yellow]")
@@ -854,7 +927,7 @@ def reindex(
 @app.command(name="export")
 def export_cmd(
     out: Path = typer.Argument(..., help="Output JSONL file (use '-' for stdout)"),
-    db:  Path = typer.Option(DEFAULT_DB, "--db"),
+    db:  Path = typer.Option(None, "--db"),
 ):
     """
     Dump all indexed chunks (with vectors) to a JSONL file.
@@ -865,7 +938,7 @@ def export_cmd(
     import json
     from .store import VectorStore
 
-    store = VectorStore(db)
+    store = _open_store(db)
     if str(out) == "-":
         fh = sys.stdout
         close_after = False
@@ -889,7 +962,7 @@ def export_cmd(
 @app.command(name="import")
 def import_cmd(
     src: Path = typer.Argument(..., help="JSONL file produced by 'ragdoll export'"),
-    db:  Path = typer.Option(DEFAULT_DB, "--db"),
+    db:  Path = typer.Option(None, "--db"),
     replace: bool = typer.Option(
         False, "--replace",
         help="Wipe the DB before importing (default: merge)",
@@ -911,7 +984,7 @@ def import_cmd(
     # Use the active embedder's expected dim (honors --fast). Building a bare
     # Embedder is cheap — model isn't loaded until we actually embed.
     expected_dim = Embedder(FAST_MODEL if _FAST_MODE else DEFAULT_MODEL).dim
-    store = VectorStore(db)
+    store = _open_store(db)
 
     # --- preflight: dim check off the first row ----------------------------
     first_vec_dim: int | None = None
@@ -1305,7 +1378,7 @@ def hooks_uninstall(
 def serve(
     watch:          list[Path] = typer.Option([], "--watch", "-w",
                                      help="Directories to watch for changes"),
-    db:             Path       = typer.Option(DEFAULT_DB, "--db"),
+    db:             Path       = typer.Option(None, "--db"),
     port:           int        = typer.Option(DEFAULT_PORT, "--port", "-p"),
     index_on_start: bool       = typer.Option(True, "--index/--no-index"),
 ):

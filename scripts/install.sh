@@ -80,10 +80,11 @@ MIN_PYTHON_MINOR=11   # Python 3.11+
 # defaults to the OS temp dir (e.g. /var/folders/... on macOS), which the OS
 # purges automatically — leaving a half-downloaded model.onnx and a confusing
 # "NO_SUCHFILE ... model.onnx" crash on the next run. Respect a user override.
-MODEL_CACHE_DIR="${FASTEMBED_CACHE_PATH:-$HOME/.cache/fastembed}"
+MODEL_CACHE_DIR="${RAGDOLL_MODEL_CACHE:-${FASTEMBED_CACHE_PATH:-$HOME/.cache/fastembed}}"
 # Export for this install session so the prefetch below lands here; the wrapper
 # script and shell rc (further down) make it stick for every future invocation.
-export FASTEMBED_CACHE_PATH="$MODEL_CACHE_DIR"
+# RAGdoll's embedder reads RAGDOLL_MODEL_CACHE and passes it to FastEmbed.
+export RAGDOLL_MODEL_CACHE="$MODEL_CACHE_DIR"
 
 # Detect repo root (script lives in scripts/, repo root is one level up)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -264,7 +265,7 @@ WRAPPER_CONTENT="#!/usr/bin/env bash
 # RAGdoll wrapper — activates venv and forwards all args
 # Pin the embedding-model cache so it never lands in a purgeable OS temp dir
 # (prevents the half-downloaded-model NO_SUCHFILE crash). User override wins.
-export FASTEMBED_CACHE_PATH=\"\${FASTEMBED_CACHE_PATH:-$MODEL_CACHE_DIR}\"
+export RAGDOLL_MODEL_CACHE=\"\${RAGDOLL_MODEL_CACHE:-$MODEL_CACHE_DIR}\"
 exec \"$VENV_DIR/bin/ragdoll\" \"\$@\"
 "
 
@@ -333,7 +334,7 @@ if ! path_contains "$BIN_DIR"; then
                 echo ""
                 echo "# >>> ragdoll install (do not edit) >>>"
                 echo "export PATH=\"$BIN_DIR:\$PATH\""
-                echo "export FASTEMBED_CACHE_PATH=\"\${FASTEMBED_CACHE_PATH:-$MODEL_CACHE_DIR}\""
+                echo "export RAGDOLL_MODEL_CACHE=\"\${RAGDOLL_MODEL_CACHE:-$MODEL_CACHE_DIR}\""
                 echo "# <<< ragdoll install <<<"
             } >> "$SHELL_RC"
             success "Added to $SHELL_RC — restart your shell or run: source $SHELL_RC"
@@ -341,6 +342,38 @@ if ! path_contains "$BIN_DIR"; then
     fi
 else
     success "$BIN_DIR is already in PATH"
+fi
+
+# =============================================================================
+section "Persisting model-cache path"
+# =============================================================================
+# RAGDOLL_MODEL_CACHE must also be set in plain interactive shells, not just
+# via the wrapper — otherwise `python -m ragdoll`, the test suite, and the
+# prefetch step below each use a different (default) cache and re-download the
+# ~200MB model. Append it once, guarded by a key check so re-running install
+# never duplicates the line. Reuses the same marker the PATH block uses so
+# uninstall.sh removes it too.
+
+RC_FILE=""
+if [[ "${SHELL:-}" == *"zsh"* ]]; then
+    RC_FILE="$HOME/.zshrc"
+elif [[ "${SHELL:-}" == *"bash"* ]]; then
+    RC_FILE="$HOME/.bashrc"
+fi
+
+if [[ -z "$RC_FILE" ]]; then
+    warn "Unknown shell — add this to your shell rc manually:"
+    echo -e "  ${BOLD}export RAGDOLL_MODEL_CACHE=\"$MODEL_CACHE_DIR\"${RESET}"
+elif [[ -f "$RC_FILE" ]] && grep -q "RAGDOLL_MODEL_CACHE" "$RC_FILE"; then
+    success "RAGDOLL_MODEL_CACHE already set in $RC_FILE"
+else
+    {
+        echo ""
+        echo "# >>> ragdoll install (do not edit) >>>"
+        echo "export RAGDOLL_MODEL_CACHE=\"\${RAGDOLL_MODEL_CACHE:-$MODEL_CACHE_DIR}\""
+        echo "# <<< ragdoll install <<<"
+    } >> "$RC_FILE"
+    success "Added RAGDOLL_MODEL_CACHE to $RC_FILE — restart your shell or run: source $RC_FILE"
 fi
 
 # =============================================================================
