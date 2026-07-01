@@ -161,6 +161,55 @@ def _daemon_search(query: str, top_k: int, repo, mode: str, db):
     return [SearchResult(**r) for r in data.get("results", [])]
 
 
+def _port_open(port: int, host: str = "127.0.0.1") -> bool:
+    """True if something is accepting TCP connections on host:port."""
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.3)
+        return sock.connect_ex((host, port)) == 0
+
+
+def _pid_alive(pid: int) -> bool:
+    """True if the process still exists (signal 0 probes without killing)."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _listening_pids(port: int) -> list[int]:
+    """PIDs listening on a TCP port. Tries lsof, then psutil; [] if neither works."""
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["lsof", "-ti", f"tcp:{port}", "-sTCP:LISTEN"],
+            capture_output=True, text=True, timeout=5,
+        )
+        pids = [int(x) for x in out.stdout.split()]
+        if pids:
+            return sorted(set(pids))
+    except (FileNotFoundError, subprocess.SubprocessError, ValueError):
+        pass
+
+    try:
+        import psutil  # type: ignore
+
+        pids = [
+            c.pid
+            for c in psutil.net_connections(kind="inet")
+            if c.pid and c.laddr and c.laddr.port == port
+            and c.status == psutil.CONN_LISTEN
+        ]
+        return sorted(set(pids))
+    except Exception:
+        return []
+
+
 @app.callback()
 def _root(
     fast: bool = typer.Option(
@@ -1508,6 +1557,60 @@ def serve(
     except OSError as exc:
         console.print(f"[red]Failed to start on port {port}: {exc}[/red]")
         raise typer.Exit(1)
+
+
+@app.command()
+def stop(
+    port:  Optional[int] = typer.Option(None, "--port", "-p",
+                               help="Daemon port (default: $RAGDOLL_PORT or 7474)"),
+    force: bool          = typer.Option(False, "--force", "-f",
+                               help="SIGKILL immediately instead of graceful SIGTERM"),
+):
+    """
+    Stop a running RAGdoll daemon (one started by 'ragdoll serve').
+
+    Finds the process listening on the daemon port and terminates it. For the
+    login-persistent launchd daemon, use 'ragdoll autostart uninstall' instead.
+    """
+    import signal
+    import time
+
+    if port is None:
+        port = int(os.environ.get("RAGDOLL_PORT", DEFAULT_PORT))
+
+    pids = _listening_pids(port)
+    if not pids:
+        if _port_open(port):
+            console.print(
+                f"[yellow]Something is listening on port {port}, but I couldn't "
+                f"resolve its PID (need lsof or psutil). Stop it manually:[/yellow]\n"
+                f"  lsof -ti :{port} | xargs kill"
+            )
+            raise typer.Exit(1)
+        console.print(f"[yellow]No RAGdoll daemon listening on port {port}.[/yellow]")
+        raise typer.Exit(0)
+
+    for pid in pids:
+        try:
+            if force:
+                os.kill(pid, signal.SIGKILL)
+                console.print(f"[green]Killed daemon (pid {pid}).[/green]")
+                continue
+            os.kill(pid, signal.SIGTERM)
+            for _ in range(50):  # wait up to ~5s for a clean exit
+                time.sleep(0.1)
+                if not _pid_alive(pid):
+                    break
+            if _pid_alive(pid):
+                os.kill(pid, signal.SIGKILL)
+                console.print(f"[green]Stopped daemon (pid {pid}, forced).[/green]")
+            else:
+                console.print(f"[green]Stopped daemon (pid {pid}).[/green]")
+        except ProcessLookupError:
+            console.print(f"[yellow]Process {pid} already gone.[/yellow]")
+        except PermissionError:
+            console.print(f"[red]No permission to stop pid {pid}.[/red]")
+            raise typer.Exit(1)
 
 
 # ---------------------------------------------------------------------------

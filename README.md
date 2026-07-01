@@ -253,14 +253,15 @@ ragdoll serve --port 8080              # custom port
 
 While it's running, `ragdoll search`, `ragdoll context`, and MCP calls **auto-route to it** — reusing the already-loaded model instead of spawning a second one in RAM. The CLI only trusts the daemon when it serves the same DB you'd query locally, so `--db` / `--fast` still hit the right index; if no compatible daemon is listening it falls back to a local load.
 
-**Stop it:** press `Ctrl+C` in its terminal. If it's running in the background:
+**Stop it:** press `Ctrl+C` in its terminal, or from anywhere:
 
 ```bash
-pkill -f "ragdoll.*serve"      # by name
-lsof -ti :7474 | xargs kill    # or by port
+ragdoll stop                   # graceful SIGTERM on the daemon port
+ragdoll stop --port 8080       # honors a custom port ($RAGDOLL_PORT too)
+ragdoll stop --force           # SIGKILL immediately
 ```
 
-For a login-persistent daemon, see [Always-on daemon](#always-on-daemon-macos).
+`stop` finds the process listening on the daemon port and terminates it (falling back to SIGKILL if it doesn't exit within ~5s). For a login-persistent launchd daemon, use `ragdoll autostart uninstall` instead.
 
 ### See what's indexed
 
