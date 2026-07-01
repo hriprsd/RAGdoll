@@ -111,6 +111,56 @@ def _build_stack(db_path: Optional[Path]):
     return store, embedder, indexer
 
 
+def _daemon_base() -> str:
+    """Base URL of a local RAGdoll daemon, honouring RAGDOLL_HOST/RAGDOLL_PORT."""
+    host = os.environ.get("RAGDOLL_HOST", "127.0.0.1")
+    port = int(os.environ.get("RAGDOLL_PORT", DEFAULT_PORT))
+    return f"http://{host}:{port}"
+
+
+def _daemon_search(query: str, top_k: int, repo, mode: str, db):
+    """Route a search to a running daemon so its warm model is reused.
+
+    Skips a ~500 MB cold model load (faster, and no second model in RAM).
+    Returns a list of SearchResult on success, or None if no compatible daemon
+    is reachable — the caller then falls back to loading the model locally.
+    """
+    import json
+    import urllib.request
+    from .store import SearchResult
+
+    base = _daemon_base()
+    want_db = os.path.abspath(_resolve_db(db))
+    try:
+        with urllib.request.urlopen(f"{base}/status", timeout=0.5) as resp:
+            status = json.loads(resp.read().decode())
+    except Exception:
+        return None  # no daemon listening
+    if status.get("status") != "ok":
+        return None
+    # Only trust the daemon if it serves the same DB we'd query locally,
+    # otherwise --db / --fast would silently hit the wrong index.
+    served = status.get("db")
+    if served and os.path.abspath(served) != want_db:
+        return None
+
+    payload = json.dumps(
+        {"query": query, "top_k": top_k, "repo": repo, "mode": mode}
+    ).encode()
+    req = urllib.request.Request(
+        f"{base}/search",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode())
+    except Exception:
+        return None  # daemon hiccup — fall back to local
+    return [SearchResult(**r) for r in data.get("results", [])]
+
+
 @app.callback()
 def _root(
     fast: bool = typer.Option(
@@ -170,6 +220,7 @@ def index(
     if not p.exists():
         console.print(f"[red]Path not found: {p}[/red]")
         raise typer.Exit(1)
+    from .indexer import LockBusy
     store, embedder, indexer = _build_stack(db)
 
     progress_mode = os.environ.get("RAGDOLL_PROGRESS", "auto").lower()
@@ -220,6 +271,11 @@ def index(
         else:
             console.print(f"Indexing [bold]{p}[/bold] ...")
             n = indexer.index_path(p)
+    except LockBusy as e:
+        # Another ragdoll process holds the single-inference lock. Fail fast
+        # instead of loading a second ~500 MB model and risking OOM.
+        console.print(f"[yellow]{e}[/yellow]")
+        raise typer.Exit(1)
     except KeyboardInterrupt:
         # Indexer's own SIGINT handler usually catches this first and stops
         # cooperatively; this is the belt-and-braces path for the rare case
@@ -327,16 +383,30 @@ def search(
         console.print("[red]--mode must be one of: hybrid, vector, bm25[/red]")
         raise typer.Exit(1)
 
-    store, embedder, _ = _build_stack(db)
-    vec = embedder.embed_query(query)
-    results = store.search(
-        query_vector=vec,
-        query_text=query,
-        top_k=top_k,
-        repo=repo,
-        mode=mode,           # type: ignore[arg-type]
-        include_memories=not no_mem,
-    )
+    results = None
+    # Prefer a running daemon: its model is already warm, so we skip a ~500 MB
+    # cold load (faster, and no second model in RAM). The daemon API has no
+    # --no-memories switch, so fall back to local when that's requested.
+    if not no_mem:
+        results = _daemon_search(query, top_k, repo, mode, db)
+
+    if results is None:
+        from .indexer import _index_lock, LockBusy
+        store, embedder, _ = _build_stack(db)
+        try:
+            with _index_lock(purpose="search"):
+                vec = embedder.embed_query(query)
+                results = store.search(
+                    query_vector=vec,
+                    query_text=query,
+                    top_k=top_k,
+                    repo=repo,
+                    mode=mode,           # type: ignore[arg-type]
+                    include_memories=not no_mem,
+                )
+        except LockBusy as e:
+            console.print(f"[yellow]{e}[/yellow]")
+            raise typer.Exit(1)
 
     if not results:
         console.print("[yellow]No results found.[/yellow]")
@@ -375,9 +445,15 @@ def explain(
       bm25_rank  — position in pure BM25 keyword search
       rrf        — final Reciprocal Rank Fusion score (higher = better)
     """
+    from .indexer import _index_lock, LockBusy
     store, embedder, _ = _build_stack(db)
-    vec = embedder.embed_query(query)
-    rows = store.explain(vec, query, top_k=top_k, repo=repo)
+    try:
+        with _index_lock(purpose="search"):
+            vec = embedder.embed_query(query)
+            rows = store.explain(vec, query, top_k=top_k, repo=repo)
+    except LockBusy as e:
+        console.print(f"[yellow]{e}[/yellow]")
+        raise typer.Exit(1)
 
     if not rows:
         console.print("[yellow]No results.[/yellow]")
@@ -635,17 +711,28 @@ def context(
         console.print("[red]--mode must be one of: hybrid, vector, bm25[/red]")
         raise typer.Exit(1)
 
-    store, embedder, _ = _build_stack(db)
-    vec     = embedder.embed_query(query)
-    # Fetch generously — we'll trim to budget
-    results = store.search(
-        query_vector=vec,
-        query_text=query,
-        top_k=50,
-        repo=repo,
-        mode=mode,           # type: ignore[arg-type]
-        include_memories=not no_mem,
-    )
+    # Fetch generously — we'll trim to budget. Prefer the warm daemon, else
+    # embed locally under the single-inference lock.
+    results = None
+    if not no_mem:
+        results = _daemon_search(query, 50, repo, mode, db)
+    if results is None:
+        from .indexer import _index_lock, LockBusy
+        store, embedder, _ = _build_stack(db)
+        try:
+            with _index_lock(purpose="search"):
+                vec = embedder.embed_query(query)
+                results = store.search(
+                    query_vector=vec,
+                    query_text=query,
+                    top_k=50,
+                    repo=repo,
+                    mode=mode,           # type: ignore[arg-type]
+                    include_memories=not no_mem,
+                )
+        except LockBusy as e:
+            console.print(f"[yellow]{e}[/yellow]")
+            raise typer.Exit(1)
 
     if not results:
         raise typer.Exit(0)

@@ -241,6 +241,27 @@ ragdoll context "auth flow" --tokens 4000 | pbcopy
 ragdoll context "rate limiting" --tokens 8000 --repo ~/my-project > ctx.txt
 ```
 
+### Run the server (daemon)
+
+Most commands work without a daemon. Start one when you want MCP integration, live file-watching, the OpenAI-compatible embeddings endpoint, or simply a **warm model** so searches skip the ~500 MB cold load:
+
+```bash
+ragdoll serve                          # http://localhost:7474
+ragdoll serve --watch ~/my-project     # also re-index on save (debounced)
+ragdoll serve --port 8080              # custom port
+```
+
+While it's running, `ragdoll search`, `ragdoll context`, and MCP calls **auto-route to it** — reusing the already-loaded model instead of spawning a second one in RAM. The CLI only trusts the daemon when it serves the same DB you'd query locally, so `--db` / `--fast` still hit the right index; if no compatible daemon is listening it falls back to a local load.
+
+**Stop it:** press `Ctrl+C` in its terminal. If it's running in the background:
+
+```bash
+pkill -f "ragdoll.*serve"      # by name
+lsof -ti :7474 | xargs kill    # or by port
+```
+
+For a login-persistent daemon, see [Always-on daemon](#always-on-daemon-macos).
+
 ### See what's indexed
 
 ```bash
@@ -479,7 +500,8 @@ RAGdoll is designed to run on developer laptops (8-32 GB RAM) without choking yo
 |---|---|
 | **Adaptive batch size** | Detects system RAM and picks batch size accordingly: 16 (<=8 GB), 32 (8-16 GB), 64 (16-32 GB), 128 (32+ GB). Override with `RAGDOLL_BATCH_SIZE=N` |
 | **Thread cap** | ONNX threads capped at half your CPU cores (min 2), preventing thrash when multiple processes run. Override with `RAGDOLL_THREADS=N` |
-| **Process lock** | File lock at `~/.ragdoll/.index.lock` ensures only one `ragdoll index` process runs ONNX inference at a time. Others queue instead of competing for RAM |
+| **Single-inference lock** | File lock at `~/.ragdoll/.index.lock` ensures only one ragdoll process runs ONNX inference at a time — now covering **search and context**, not just index. A second process prints a one-line notice, waits up to `RAGDOLL_LOCK_TIMEOUT` seconds (default 120), then **fails fast** with a clear message instead of blocking silently or loading a second ~500 MB model |
+| **Warm daemon reuse** | When `ragdoll serve` is running, `ragdoll search` / `ragdoll context` route to its already-loaded model over HTTP, skipping the cold load entirely (and never holding two models in RAM) |
 | **Model unload** | ONNX model and C-level buffers are explicitly released after indexing completes, instead of holding memory until process exit |
 
 Run `ragdoll status` to see your detected configuration (accelerator, threads, batch size).

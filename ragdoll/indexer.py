@@ -16,6 +16,7 @@ import logging
 import os
 import queue
 import signal
+import sys
 import threading
 import time
 from contextlib import contextmanager
@@ -122,15 +123,37 @@ EMBED_WINDOW = int(os.environ.get("RAGDOLL_EMBED_WINDOW", max(BATCH_SIZE * 8, 10
 
 _LOCK_PATH = Path(os.environ.get("RAGDOLL_HOME", Path.home() / ".ragdoll")) / ".index.lock"
 
+# How long a second process waits for the ONNX inference lock before giving up.
+# Overridable so power users on beefier machines can wait longer if they want to
+# queue back-to-back runs. Kept short by default: waiting 10 minutes silently
+# (the old behaviour) looks exactly like a hang.
+_DEFAULT_LOCK_TIMEOUT = int(os.environ.get("RAGDOLL_LOCK_TIMEOUT", "120"))
+
+
+class LockBusy(RuntimeError):
+    """Raised when the single-inference lock can't be acquired in time.
+
+    Signals that another ragdoll process is already running the model. Callers
+    should surface a friendly message and exit rather than loading a second
+    ~500 MB model and risking OOM.
+    """
+
 
 @contextmanager
-def _index_lock(timeout: int = 600):
-    """File-based lock so only one ragdoll index process embeds at a time.
+def _index_lock(timeout: Optional[int] = None, *, purpose: str = "index"):
+    """File lock so only one ragdoll process runs ONNX inference at a time.
 
-    Other processes wait (with a timeout) rather than competing for RAM.
-    Uses fcntl on Unix. On platforms without fcntl, skips locking (better
-    to risk contention than to crash).
+    Loading the model costs ~500 MB; letting several processes do it at once is
+    the main cause of OOM on memory-constrained machines. A second process
+    prints a one-line notice, waits up to `timeout` seconds, then raises
+    `LockBusy` (fail fast) instead of blocking silently or piling on another
+    model.
+
+    Uses fcntl on Unix. On platforms without fcntl, skips locking (better to
+    risk contention than to crash).
     """
+    if timeout is None:
+        timeout = _DEFAULT_LOCK_TIMEOUT
     try:
         import fcntl
     except ImportError:
@@ -143,19 +166,27 @@ def _index_lock(timeout: int = 600):
     try:
         lock_fd = open(_LOCK_PATH, "w")
         deadline = time.monotonic() + timeout
+        notified = False
         while True:
             try:
                 fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 break
             except (BlockingIOError, OSError):
                 if time.monotonic() > deadline:
-                    logger.warning(
-                        "Timed out waiting for index lock -- another ragdoll "
-                        "index process may be stuck. Proceeding anyway."
+                    raise LockBusy(
+                        f"Another ragdoll process is using the model — timed out "
+                        f"after {timeout}s waiting to {purpose}. It's still running, "
+                        f"not stuck; retry shortly or set RAGDOLL_LOCK_TIMEOUT to wait longer."
                     )
-                    break
-                logger.info("Another ragdoll index is running -- waiting for lock...")
-                time.sleep(2)
+                if not notified:
+                    print(
+                        f"\u23f3 Another ragdoll process is using the model — "
+                        f"waiting up to {timeout}s to {purpose}\u2026",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    notified = True
+                time.sleep(1)
         yield
     finally:
         if lock_fd is not None:
