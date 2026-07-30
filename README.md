@@ -22,9 +22,7 @@
 - [Usage](#usage)
 - [Claude Code integration (MCP)](#claude-code-integration-mcp)
 - [Cursor integration](#cursor-integration)
-- [OpenAI-compatible embeddings endpoint](#openai-compatible-embeddings-endpoint)
-- [Multiple profiles](#multiple-profiles)
-- [Always-on daemon](#always-on-daemon-macos)
+- [Advanced usage](#advanced-usage)
 - [Troubleshooting](#troubleshooting)
 - [Stack](#stack)
 - [Deep dive](#deep-dive)
@@ -49,112 +47,9 @@ Works with **Claude Code**, **Cursor**, **Copilot**, **Continue.dev**, or anythi
 
 ## How it works
 
-### Indexing flow
+`ragdoll index` walks your repo, splits files into chunks (AST for Python, regex for Go/TS, headings for Markdown, line-windows for the rest), embeds each chunk locally with ONNX, and stores everything in one SQLite file behind a vector index and an FTS5 keyword index. `ragdoll search` embeds your query, runs vector and BM25 search in parallel, and fuses them with Reciprocal Rank Fusion.
 
-```mermaid
-sequenceDiagram
-    participant U as User / Git Hook
-    participant CLI as ragdoll index
-    participant CH as Chunker
-    participant EM as Embedder<br/>(FastEmbed ONNX)
-    participant DB as SQLite + sqlite-vec + FTS5<br/>~/.ragdoll/ragdoll.db
-
-    U->>CLI: ragdoll index ~/my-project
-    CLI->>CLI: walk dirs (prune node_modules,<br/>.git, symlinks, binaries)
-    CLI->>CH: chunk_file(path) for each file
-    CH-->>CLI: RawChunk[] (AST/regex/heading splits)
-    CLI->>CLI: diff content hashes vs DB<br/>(skip unchanged files)
-    CLI->>EM: embed(batch of chunk texts)
-    EM-->>CLI: float32 vectors (768-dim, ONNX, local)
-    CLI->>DB: upsert chunks + vectors + FTS
-    DB-->>CLI: done
-    CLI-->>U: "42 chunks indexed"
-```
-
-### Search flow
-
-```mermaid
-sequenceDiagram
-    participant U as User / Tool
-    participant CLI as ragdoll search<br/>or MCP / HTTP
-    participant EM as Embedder
-    participant DB as SQLite + sqlite-vec + FTS5
-
-    U->>CLI: "how do we handle auth?"
-    CLI->>EM: embed_query(query)
-    EM-->>CLI: query vector
-
-    par Hybrid search (default)
-        CLI->>DB: vec_chunks KNN (cosine)
-        DB-->>CLI: vector results + ranks
-        CLI->>DB: fts_chunks MATCH (BM25)
-        DB-->>CLI: keyword results + ranks
-    end
-
-    CLI->>CLI: Reciprocal Rank Fusion (k=60)
-    CLI-->>U: ranked results with file + line refs
-```
-
-### Live daemon flow (optional, for MCP integration)
-
-```mermaid
-sequenceDiagram
-    participant CC as Claude Code / Cursor
-    participant MCP as ragdoll mcp<br/>(stdio)
-    participant API as ragdoll serve<br/>(localhost:7474)
-    participant EM as Embedder
-    participant DB as SQLite + sqlite-vec + FTS5
-    participant FS as File Watcher
-
-    CC->>MCP: search_codebase("rate limiting")
-    MCP->>API: POST /search {mode: "hybrid"}
-    API->>EM: embed_query(...)
-    EM-->>API: vector
-    API->>DB: KNN + BM25 → RRF
-    DB-->>API: chunks
-    API-->>MCP: JSON results
-    MCP-->>CC: formatted code blocks
-
-    Note over FS,DB: In parallel, debounced watcher re-indexes on save
-    FS->>API: file changed event (500ms debounce)
-    API->>DB: delete + re-embed file
-```
-
-### Architecture overview
-
-```
-┌──────────────────────────────────────────────────────────┐
-│                     Your machine                          │
-│                                                           │
-│  ┌──────────────┐   ┌──────────────────────────────┐    │
-│  │  Dev tools   │   │      ragdoll daemon           │    │
-│  │              │   │   (optional, port 7474)       │    │
-│  │ Claude Code ─┼───┤► MCP stdio adapter            │    │
-│  │ Cursor      ─┼───┘  FastAPI HTTP server          │    │
-│  │ Copilot     ─┼─────► POST /v1/embeddings         │    │
-│  │ Continue.dev─┼─────► POST /search                │    │
-│  └──────────────┘   └────────────┬─────────────────┘    │
-│                                   │                       │
-│  ┌────────────────────────────────▼──────────────────┐   │
-│  │              ragdoll CLI (no daemon needed)        │   │
-│  │                                                    │   │
-│  │  ragdoll index   →  Chunker + Embedder             │   │
-│  │  ragdoll search  →  Embedder + VectorStore         │   │
-│  │  ragdoll context →  Search + token-budgeted pack   │   │
-│  │  ragdoll hooks   →  git post-checkout/merge        │   │
-│  └────────────────────────────────┬──────────────────┘   │
-│                                   │                       │
-│  ┌────────────────────────────────▼──────────────────┐   │
-│  │         ~/.ragdoll/ragdoll.db                      │   │
-│  │                                                    │   │
-│  │  chunks      — content, path, repo, lang, hash     │   │
-│  │  vec_chunks  — sqlite-vec 768-dim float32 vectors  │   │
-│  │  fts_chunks  — FTS5 BM25 index over content        │   │
-│  └────────────────────────────────────────────────────┘   │
-└──────────────────────────────────────────────────────────┘
-```
-
----
+Want the full picture? The [architecture and data-flow diagrams](docs/architecture.md) walk through indexing, search, and the daemon end to end, and the [conceptual deep dive](docs/how-it-works.md) explains embeddings, BM25, and Reciprocal Rank Fusion from scratch.
 
 ## Install
 
@@ -208,10 +103,10 @@ ragdoll index ~/my-project
 ```
 
 Shows a progress bar for directories. Skips unchanged files via content hashing, and
-**embeds each unique chunk only once per run** — identical boilerplate repeated across files
+**embeds each unique chunk only once per run** - identical boilerplate repeated across files
 (license headers, shared templates, vendored snippets) reuses one vector instead of
 re-embedding every copy. On completion it reports the split, e.g.
-`Done — 812 chunks written (640 embedded, 172 reused)`, so a resume of a partial index no
+`Done - 812 chunks written (640 embedded, 172 reused)`, so a resume of a partial index no
 longer looks like a full rebuild.
 
 #### Faster / cooler indexing on big repos
@@ -219,9 +114,9 @@ longer looks like a full rebuild.
 The first full index of a large repo is CPU-heavy (it embeds everything once). Levers:
 
 ```bash
-ragdoll --quantized index ~/my-project     # int8 nomic (768-dim): ~2× faster on CPU, tiny recall cost
-ragdoll --fast index ~/my-project          # bge-small (384-dim): ~3× faster, slightly weaker recall
-ragdoll index ~/my-project --throttle 150  # sleep 150ms between batches — cooler, responsive, slower
+ragdoll --quantized index ~/my-project     # int8 nomic (768-dim): ~2x faster on CPU, tiny recall cost
+ragdoll --fast index ~/my-project          # bge-small (384-dim): ~3x faster, slightly weaker recall
+ragdoll index ~/my-project --throttle 150  # sleep 150ms between batches - cooler, responsive, slower
 ```
 
 `--quantized` and `--fast` each use their own DB (`~/.ragdoll/ragdoll-quant.db`,
@@ -229,10 +124,10 @@ ragdoll index ~/my-project --throttle 150  # sleep 150ms between batches — coo
 via `RAGDOLL_THROTTLE_MS`. On macOS, `taskpolicy -b ragdoll index …` runs it at background
 priority (efficiency cores) so your machine stays responsive.
 
-**Model choice is sticky — you don't have to remember it.**
+**Model choice is sticky - you don't have to remember it.**
 
 - An **existing index always uses the model it was built with.** Point any command at a DB and RAGdoll
-  reads the recorded model from it — no flag needed. A flag that *contradicts* what the index was built
+  reads the recorded model from it - no flag needed. A flag that *contradicts* what the index was built
   with is a hard error (it would silently mix incompatible vectors); run `ragdoll reindex` to switch.
 - The **last model flag you pass is remembered** as your default (in `~/.ragdoll/config.json`), so bare
   `ragdoll index` / `ragdoll search` reuse it. Pass `--fast`/`--quantized`/`--standard` any time to
@@ -283,7 +178,7 @@ ragdoll serve --watch ~/my-project     # also re-index on save (debounced)
 ragdoll serve --port 8080              # custom port
 ```
 
-While it's running, `ragdoll search`, `ragdoll context`, and MCP calls **auto-route to it** — reusing the already-loaded model instead of spawning a second one in RAM. The CLI only trusts the daemon when it serves the same DB you'd query locally, so `--db` / `--fast` still hit the right index; if no compatible daemon is listening it falls back to a local load.
+While it's running, `ragdoll search`, `ragdoll context`, and MCP calls **auto-route to it** - reusing the already-loaded model instead of spawning a second one in RAM. The CLI only trusts the daemon when it serves the same DB you'd query locally, so `--db` / `--fast` still hit the right index; if no compatible daemon is listening it falls back to a local load.
 
 **Stop it:** press `Ctrl+C` in its terminal, or from anywhere:
 
@@ -374,91 +269,15 @@ Add to `.cursor/mcp.json` in your project:
 
 ---
 
-## OpenAI-compatible embeddings endpoint
+## Advanced usage
 
-RAGdoll can serve as a **drop-in local embedding provider** for anything that speaks the OpenAI embeddings API: Continue.dev, LangChain, LlamaIndex, Copilot extensions, custom scripts. Your text never leaves the machine.
+Power-user features, each documented in [docs/advanced.md](docs/advanced.md):
 
-```bash
-ragdoll serve        # starts daemon on http://localhost:7474
-```
-
-```bash
-# Works with any OpenAI SDK:
-curl -s http://localhost:7474/v1/embeddings \
-     -H "Content-Type: application/json" \
-     -d '{"input": "how does auth work", "model": "ragdoll"}'
-```
-
-Example response:
-```json
-{
-  "object": "list",
-  "data": [{"object": "embedding", "index": 0, "embedding": [0.012, -0.043, ...]}],
-  "model": "ragdoll",
-  "usage": {"prompt_tokens": 0, "total_tokens": 0}
-}
-```
-
-**Continue.dev** `config.json`:
-```json
-"embeddingsProvider": {
-  "provider": "openai",
-  "model": "ragdoll",
-  "apiBase": "http://localhost:7474/v1"
-}
-```
-
-**LangChain / LlamaIndex**: point `OpenAIEmbeddings(base_url="http://localhost:7474/v1", api_key="ignored")`. No API key required, the server is local-only.
-
----
-
-## Multiple profiles
-
-Keep separate indexes for different workspaces by setting `RAGDOLL_DB`:
-
-```bash
-RAGDOLL_DB=~/.ragdoll/work.db ragdoll index ~/repos/work
-RAGDOLL_DB=~/.ragdoll/side.db ragdoll index ~/repos/side-project
-```
-
-All commands honour the variable, so you can set it per-shell or per-project.
-
----
-
-## Debug queries with `ragdoll explain`
-
-Want to know why a result ranked where it did?
-
-```bash
-ragdoll explain "jwt validation"
-```
-
-Shows the per-result `vec_rank`, `bm25_rank`, and final `rrf` score. Useful for tuning queries or catching FTS misses.
-
----
-
-## Backup and share indexes
-
-```bash
-ragdoll export index.jsonl          # dump everything (content + vectors)
-ragdoll import index.jsonl --replace  # seed a fresh install
-```
-
-Handy for backups or onboarding a teammate without re-indexing from scratch.
-
----
-
-## Always-on daemon (macOS)
-
-Tired of restarting `ragdoll serve`? Install a launchd agent:
-
-```bash
-ragdoll autostart install --watch ~/repos/work --watch ~/repos/side
-```
-
-The daemon now starts at login, survives reboots, and logs to `~/.ragdoll/ragdoll.log`. Uninstall with `ragdoll autostart uninstall`.
-
----
+- **OpenAI-compatible embeddings endpoint** - use RAGdoll's local model as a drop-in `/v1/embeddings` provider for Continue.dev, LangChain, LlamaIndex, or any OpenAI SDK. No key, nothing leaves the machine.
+- **Multiple profiles** - separate indexes per workspace via `RAGDOLL_DB`.
+- **Debug queries with `ragdoll explain`** - see the vector rank, BM25 rank, and RRF score behind each result.
+- **Backup and share indexes** - `ragdoll export` / `import` a single JSONL file.
+- **Always-on daemon (macOS)** - run `ragdoll serve` at login via a launchd agent.
 
 ## Diagnose problems
 
@@ -469,16 +288,6 @@ ragdoll doctor
 Checks the DB, FTS schema, embedding model, daemon port, and launchd agent. One-stop triage for a broken install.
 
 ---
-
-## How it works
-
-RAGdoll uses a **three-layer search stack**: embeddings, BM25, and hybrid fusion.
-
-- **Embeddings** turn your code into 768-dimensional vectors capturing semantic meaning
-- **FTS5 BM25** provides exact keyword matching for identifiers, error strings, and function names
-- **Reciprocal Rank Fusion** combines both signals: a result appearing in both lists floats to the top
-
-Full explanation with diagrams: [docs/how-it-works.md](docs/how-it-works.md)
 
 ## Stack
 
@@ -533,7 +342,7 @@ RAGdoll is designed to run on developer laptops (8-32 GB RAM) without choking yo
 |---|---|
 | **Adaptive batch size** | Detects system RAM and picks batch size accordingly: 16 (<=8 GB), 32 (8-16 GB), 64 (16-32 GB), 128 (32+ GB). Override with `RAGDOLL_BATCH_SIZE=N` |
 | **Thread cap** | ONNX threads capped at half your CPU cores (min 2), preventing thrash when multiple processes run. Override with `RAGDOLL_THREADS=N` |
-| **Single-inference lock** | File lock at `~/.ragdoll/.index.lock` ensures only one ragdoll process runs ONNX inference at a time — now covering **search and context**, not just index. A second process prints a one-line notice, waits up to `RAGDOLL_LOCK_TIMEOUT` seconds (default 120), then **fails fast** with a clear message instead of blocking silently or loading a second ~500 MB model |
+| **Single-inference lock** | File lock at `~/.ragdoll/.index.lock` ensures only one ragdoll process runs ONNX inference at a time - now covering **search and context**, not just index. A second process prints a one-line notice, waits up to `RAGDOLL_LOCK_TIMEOUT` seconds (default 120), then **fails fast** with a clear message instead of blocking silently or loading a second ~500 MB model |
 | **Warm daemon reuse** | When `ragdoll serve` is running, `ragdoll search` / `ragdoll context` route to its already-loaded model over HTTP, skipping the cold load entirely (and never holding two models in RAM) |
 | **Model unload** | ONNX model and C-level buffers are explicitly released after indexing completes, instead of holding memory until process exit |
 

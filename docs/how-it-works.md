@@ -1,4 +1,4 @@
-# How RAGdoll works — embeddings, FTS5, and hybrid search
+# How RAGdoll works - embeddings, FTS5, and hybrid search
 
 This document explains the three-layer search stack inside RAGdoll and why each piece exists.
 
@@ -68,7 +68,7 @@ graph TB
 
 ## 1. What an embedding actually does to your code
 
-When RAGdoll indexes a file, each chunk of code or text goes through an **embedding model** — specifically `nomic-embed-text-v1.5`, a 768-dimensional model that runs entirely on your CPU via **FastEmbed** (ONNX Runtime — no PyTorch, ~50 MB deps).
+When RAGdoll indexes a file, each chunk of code or text goes through an **embedding model** - specifically `nomic-embed-text-v1.5`, a 768-dimensional model that runs entirely on your CPU via **FastEmbed** (ONNX Runtime - no PyTorch, ~50 MB deps).
 
 The model converts text into a vector: a list of 768 floating-point numbers. What makes this useful is that **the model was trained to place semantically similar text close together in that 768-dimensional space**.
 
@@ -90,14 +90,14 @@ You never see these numbers. What matters is that **similar meaning = small dist
 ### What it cannot do
 
 - It has no memory of your specific variable names unless they appear in training data
-- Exact matches (`handleRateLimit` as a string) are unreliable in embedding space — the model may not have seen that identifier before
+- Exact matches (`handleRateLimit` as a string) are unreliable in embedding space - the model may not have seen that identifier before
 - Typos or unusual abbreviations can miss
 
 This is exactly why we add BM25.
 
 ---
 
-## 2. BM25 via SQLite FTS5 — keyword search for free
+## 2. BM25 via SQLite FTS5 - keyword search for free
 
 SQLite ships with **FTS5** (Full Text Search 5), a battle-hardened BM25 implementation. BM25 is the same algorithm that powers Elasticsearch and most search engines' keyword layer.
 
@@ -126,11 +126,11 @@ even if they never contain the exact string.
 | Synonym: "authentication" finding `login` code | Vector |
 | Cross-language: same pattern in 3 languages | Vector |
 
-FTS5 in RAGdoll uses the `unicode61` tokenizer with `remove_diacritics 1`. This correctly handles camelCase and snake_case because the tokenizer splits on non-alphanumeric characters — so `handleRateLimit` is tokenized as `handleRateLimit` (one token, matched exactly), while `handle_rate_limit` becomes three tokens.
+FTS5 in RAGdoll uses the `unicode61` tokenizer with `remove_diacritics 1`. This correctly handles camelCase and snake_case because the tokenizer splits on non-alphanumeric characters - so `handleRateLimit` is tokenized as `handleRateLimit` (one token, matched exactly), while `handle_rate_limit` becomes three tokens.
 
 ---
 
-## 3. Hybrid search — Reciprocal Rank Fusion
+## 3. Hybrid search - Reciprocal Rank Fusion
 
 Neither BM25 nor vector search is universally best. RAGdoll's default mode combines both using **Reciprocal Rank Fusion (RRF)**.
 
@@ -140,7 +140,7 @@ Neither BM25 nor vector search is universally best. RAGdoll's default mode combi
 For each result, regardless of which search found it:
   score(doc) = Σ  1 / (k + rank_in_that_search)
 
-k = 60  (standard constant — dampens the effect of very high ranks)
+k = 60  (standard constant - dampens the effect of very high ranks)
 ```
 
 Worked example for query `"handleRateLimit in middleware"`:
@@ -216,9 +216,9 @@ A document that appears in **both** result sets gets double-counted and floats t
 ## 5. The three search modes explained
 
 ```bash
-ragdoll search "auth flow"               # hybrid (default) — best for most queries
-ragdoll search "handleRateLimit" --mode bm25    # exact identifier — guaranteed match
-ragdoll search "how does auth work" --mode vector  # conceptual — ignore exact tokens
+ragdoll search "auth flow"               # hybrid (default) - best for most queries
+ragdoll search "handleRateLimit" --mode bm25    # exact identifier - guaranteed match
+ragdoll search "how does auth work" --mode vector  # conceptual - ignore exact tokens
 ```
 
 | Mode | When to use |
@@ -233,7 +233,7 @@ ragdoll search "how does auth work" --mode vector  # conceptual — ignore exact
 
 `ragdoll remember "we use JWT because the mobile client can't do cookies"` stores a chunk with `language=note` directly in the same SQLite table as code. It gets embedded and FTS-indexed identically to code.
 
-When you search for "auth approach", the memory note competes alongside actual code. If both are relevant, hybrid RRF will surface both. Memories are not segregated — they're first-class search results.
+When you search for "auth approach", the memory note competes alongside actual code. If both are relevant, hybrid RRF will surface both. Memories are not segregated - they're first-class search results.
 
 You can suppress them with `--no-memories` if you want code-only results.
 
@@ -243,9 +243,9 @@ You can suppress them with `--no-memories` if you want code-only results.
 
 ```
 ~/.ragdoll/ragdoll.db
-  ├── chunks          TEXT table — content, paths, language, timestamps
-  ├── vec_chunks      sqlite-vec virtual table — 768-dim float32 vectors
-  └── fts_chunks      FTS5 virtual table — tokenized content for BM25
+  ├── chunks          TEXT table - content, paths, language, timestamps
+  ├── vec_chunks      sqlite-vec virtual table - 768-dim float32 vectors
+  └── fts_chunks      FTS5 virtual table - tokenized content for BM25
 ```
 
 All three tables are kept in sync by `store.upsert()` and `store._delete_ids()`. The DB uses WAL mode for safe concurrent reads.
