@@ -1,5 +1,5 @@
 """
-Chunker — splits files into semantically meaningful chunks.
+Chunker - splits files into semantically meaningful chunks.
 - Python: AST-aware, splits on top-level and class-level definitions
 - Markdown/RST/text: heading-based paragraph splits
 - Everything else: sliding line-window fallback
@@ -24,8 +24,8 @@ CHUNK_OVERLAP = 8    # overlapping lines between chunks
 # any splitter gets post-split if it exceeds this.
 #
 # Why: the embedding model (nomic-embed-text-v1.5) has an 8192-token window.
-# One token ~= 4 chars on English/code, so ~8000 chars ≈ 2000 tokens keeps us
-# well inside the window AND keeps onnxruntime memory bounded — a single
+# One token ~= 4 chars on English/code, so ~8000 chars ~ 2000 tokens keeps us
+# well inside the window AND keeps onnxruntime memory bounded - a single
 # 28 KB chunk will OOM-kill the process during batched inference.
 MAX_CHUNK_CHARS = 8000
 
@@ -194,7 +194,7 @@ def detect_language(path: Path) -> str:
 
 
 def _is_binary(path: Path, sample_size: int = 8192) -> bool:
-    """Quick binary detection — read first N bytes and look for null bytes."""
+    """Quick binary detection - read first N bytes and look for null bytes."""
     try:
         with open(path, "rb") as f:
             chunk = f.read(sample_size)
@@ -222,7 +222,7 @@ def _split_oversized(chunks: list[RawChunk]) -> list[RawChunk]:
             end = min(i + CHUNK_SIZE, len(lines))
             piece = "\n".join(lines[i:end])
             # If even a CHUNK_SIZE window is too big (very long lines), hard-cap
-            # on characters as a last resort — slicing mid-line is ugly but
+            # on characters as a last resort - slicing mid-line is ugly but
             # guaranteed to fit in the model's window.
             if len(piece) > MAX_CHUNK_CHARS:
                 piece = piece[:MAX_CHUNK_CHARS]
@@ -326,7 +326,7 @@ def _chunk_python(text: str, language: str) -> list[RawChunk]:
             ))
 
     # Emit module preamble (imports, constants, type aliases, __all__)
-    # — everything before the first function/class definition.
+    # - everything before the first function/class definition.
     first_def_line = None
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):

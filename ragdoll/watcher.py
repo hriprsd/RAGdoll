@@ -1,5 +1,5 @@
 """
-File watcher — monitors directories for changes and triggers re-indexing.
+File watcher - monitors directories for changes and triggers re-indexing.
 Uses watchdog for cross-platform filesystem events.
 
 Events are debounced (500ms) and dispatched on a background thread
@@ -32,7 +32,7 @@ WATCHED_EXTENSIONS = {
 class RagdollEventHandler(FileSystemEventHandler):
     def __init__(self, on_change: Callable[[Path, str], None]):
         """
-        on_change(path, event_type) — called with 'modified', 'created', or 'deleted'.
+        on_change(path, event_type) - called with 'modified', 'created', or 'deleted'.
         Calls are debounced and dispatched off the watchdog thread.
         """
         self._on_change = on_change

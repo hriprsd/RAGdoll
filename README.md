@@ -229,6 +229,15 @@ ragdoll index ~/my-project --throttle 150  # sleep 150ms between batches — coo
 via `RAGDOLL_THROTTLE_MS`. On macOS, `taskpolicy -b ragdoll index …` runs it at background
 priority (efficiency cores) so your machine stays responsive.
 
+**Model choice is sticky — you don't have to remember it.**
+
+- An **existing index always uses the model it was built with.** Point any command at a DB and RAGdoll
+  reads the recorded model from it — no flag needed. A flag that *contradicts* what the index was built
+  with is a hard error (it would silently mix incompatible vectors); run `ragdoll reindex` to switch.
+- The **last model flag you pass is remembered** as your default (in `~/.ragdoll/config.json`), so bare
+  `ragdoll index` / `ragdoll search` reuse it. Pass `--fast`/`--quantized`/`--standard` any time to
+  change it; `--standard` returns to the default nomic model.
+
 Once a repo is indexed, keep it fresh incrementally with the [daemon watcher](#run-the-server-daemon)
 instead of re-running big batches.
 

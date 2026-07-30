@@ -1,5 +1,5 @@
 """
-Indexer — walks directories, chunks files, embeds, and stores.
+Indexer - walks directories, chunks files, embeds, and stores.
 Handles incremental updates by comparing content hashes.
 
 Memory safety:
@@ -186,14 +186,14 @@ def _index_lock(timeout: Optional[int] = None, *, purpose: str = "index"):
             except (BlockingIOError, OSError):
                 if time.monotonic() > deadline:
                     raise LockBusy(
-                        f"Another ragdoll process is using the model — timed out "
+                        f"Another ragdoll process is using the model - timed out "
                         f"after {timeout}s waiting to {purpose}. It's still running, "
                         f"not stuck; retry shortly or set RAGDOLL_LOCK_TIMEOUT to wait longer."
                     )
                 if not notified:
                     print(
-                        f"\u23f3 Another ragdoll process is using the model — "
-                        f"waiting up to {timeout}s to {purpose}\u2026",
+                        f"Another ragdoll process is using the model - "
+                        f"waiting up to {timeout}s to {purpose}...",
                         file=sys.stderr,
                         flush=True,
                     )
@@ -229,7 +229,7 @@ def _real_case_dir(parent: Path) -> dict[str, str]:
 def _canonical_path(p: Path) -> Path:
     """Return `p` with the actual on-disk casing for every component.
 
-    macOS's filesystem is case-insensitive but case-preserving — `Path.resolve()`
+    macOS's filesystem is case-insensitive but case-preserving - `Path.resolve()`
     keeps whatever casing the user typed (`/RAGdoll` vs `/ragdoll`). Indexing
     with two different casings creates two unrelated sets of chunk rows in the
     DB and forces a full re-embed every time the casing changes. Walking each
@@ -249,7 +249,7 @@ def _canonical_path(p: Path) -> Path:
 
 @lru_cache(maxsize=128)
 def _find_repo_root(path: Path) -> str:
-    """Resolve the git repo root for a directory. Cached — avoids re-reading .git per file."""
+    """Resolve the git repo root for a directory. Cached - avoids re-reading .git per file."""
     try:
         repo = git.Repo(path, search_parent_directories=True)
         root = repo.working_tree_dir
@@ -297,7 +297,7 @@ class Indexer:
         """Install a SIGINT handler that flips the cancellation flag.
 
         onnxruntime's `model.embed()` is a C call that won't return mid-batch
-        even when SIGINT fires — Python only delivers the signal when control
+        even when SIGINT fires - Python only delivers the signal when control
         re-enters the interpreter. We can't interrupt the in-flight batch, but
         we can guarantee the loop stops at the next safe point (between files
         or between batches) instead of running to completion.
@@ -306,7 +306,7 @@ class Indexer:
         Second Ctrl+C: restore default handler so the user can hard-kill.
         """
         if signal.getsignal(signal.SIGINT) is None:
-            # Non-main thread — can't install signal handlers. No-op.
+            # Non-main thread - can't install signal handlers. No-op.
             yield
             return
         hits = {"n": 0}
@@ -316,7 +316,7 @@ class Indexer:
             self._cancelled = True
             if hits["n"] == 1:
                 logger.warning(
-                    "Cancellation requested — finishing current batch then stopping. "
+                    "Cancellation requested - finishing current batch then stopping. "
                     "Press Ctrl+C again to abort immediately."
                 )
             else:
@@ -360,7 +360,7 @@ class Indexer:
             self._store.check_embed_model(self._embedder.model_name, self._embedder.dim)
             _model_checked = True
 
-        # Normalize on-disk casing once for the run — `_walk_files` does this
+        # Normalize on-disk casing once for the run - `_walk_files` does this
         # per-file too, but doing it here covers the single-file branch.
         path = _canonical_path(path)
 
@@ -381,7 +381,7 @@ class Indexer:
                     return 0
 
                 # Preload per-chunk hashes AND existing vectors keyed by content hash
-                # in one query each — lets the indexer skip embedding any chunk whose
+                # in one query each - lets the indexer skip embedding any chunk whose
                 # content is unchanged (even when its *position* in the file shifted).
                 all_hashes = self._store.all_hashes_by_index()
                 all_vectors = self._store.all_vectors_by_hash()
@@ -399,7 +399,7 @@ class Indexer:
 
         A background thread reads + chunks + plans files (disk I/O + CPU, no DB,
         no embedding). This thread embeds (onnxruntime releases the GIL during
-        inference, so planning genuinely overlaps it) and does all DB writes —
+        inference, so planning genuinely overlaps it) and does all DB writes -
         keeping SQLite single-threaded. Chunks are batched across files so the
         model always gets full batches instead of one underfull batch per file.
         """
@@ -432,11 +432,11 @@ class Indexer:
         indexed = 0
         files_done = 0
 
-        # Global content-hash → vector cache. Seeded from every vector already in
+        # Global content-hash -> vector cache. Seeded from every vector already in
         # the DB, then grown as we embed. Lets identical chunks (boilerplate
-        # repeated across files — license headers, shared helm templates, vendored
+        # repeated across files - license headers, shared helm templates, vendored
         # snippets) be embedded ONCE per run instead of once per file. Measured
-        # ~18–25% of chunks in config-heavy repos are cross-file duplicates.
+        # ~18-25% of chunks in config-heavy repos are cross-file duplicates.
         run_vectors: dict[str, list] = {}
         for fv in all_vectors.values():
             run_vectors.update(fv)
@@ -501,7 +501,7 @@ class Indexer:
 
                 if self._cancelled:
                     logger.warning(
-                        f"Cancelled — stopped after {files_done}/{total} files."
+                        f"Cancelled - stopped after {files_done}/{total} files."
                     )
                     break
 
@@ -554,13 +554,13 @@ class Indexer:
         existing_hashes: dict[int, str],
         existing_vectors: dict[str, list[float]],
     ) -> FilePlan | None:
-        """Chunk a file and decide what to prune / reuse / embed — no DB writes,
+        """Chunk a file and decide what to prune / reuse / embed - no DB writes,
         no embedding. Safe to run on a background thread.
 
         Two-tier reuse, in order of preference:
 
         1. If the chunk at position `idx` still has the same content hash as in
-           the DB, nothing is written — the existing row is already correct.
+           the DB, nothing is written - the existing row is already correct.
         2. Otherwise, if the new chunk's content hash matches *any* vector
            already stored for this file (content-anchored), the existing vector
            is reused and only the row is re-written at the new position. This
@@ -580,7 +580,7 @@ class Indexer:
             new_hash = VectorStore.content_hash(rc.content)
             if existing_hashes.get(idx) == new_hash:
                 unchanged += 1
-                continue  # row already correct — no write at all
+                continue  # row already correct - no write at all
             cached = existing_vectors.get(new_hash)
             if cached is not None:
                 reused.append((idx, rc, new_hash, cached))
@@ -646,7 +646,7 @@ class Indexer:
         for start in range(0, len(plan.to_embed), BATCH_SIZE):
             if self._cancelled:
                 # Don't start another (multi-second) embed batch after Ctrl+C.
-                # Partially-indexed files are fine — each chunk row is independent.
+                # Partially-indexed files are fine - each chunk row is independent.
                 break
             batch = plan.to_embed[start : start + BATCH_SIZE]
             need: dict[str, str] = {}  # hash -> content, unique & not yet embedded

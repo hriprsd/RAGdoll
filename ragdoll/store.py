@@ -1,18 +1,18 @@
 """
-Vector store — SQLite + sqlite-vec + FTS5 for local, file-based persistence.
+Vector store - SQLite + sqlite-vec + FTS5 for local, file-based persistence.
 
 Single file at ~/.ragdoll/ragdoll.db. Inspect any time with:
   sqlite3 ~/.ragdoll/ragdoll.db
 
 Schema:
-  chunks      — metadata (source_path, repo, language, lines, content, hash, indexed_at)
-  vec_chunks  — sqlite-vec virtual table, float32 embeddings
-  fts_chunks  — FTS5 virtual table, BM25 full-text index over content
+  chunks      - metadata (source_path, repo, language, lines, content, hash, indexed_at)
+  vec_chunks  - sqlite-vec virtual table, float32 embeddings
+  fts_chunks  - FTS5 virtual table, BM25 full-text index over content
 
 Search modes:
-  vector  — pure KNN cosine similarity (good for semantic / natural language)
-  bm25    — pure FTS5 BM25 (good for exact identifiers, error messages)
-  hybrid  — Reciprocal Rank Fusion of both (best overall, default)
+  vector  - pure KNN cosine similarity (good for semantic / natural language)
+  bm25    - pure FTS5 BM25 (good for exact identifiers, error messages)
+  hybrid  - Reciprocal Rank Fusion of both (best overall, default)
 """
 
 from __future__ import annotations
@@ -49,7 +49,7 @@ FTS_TOKENIZE = "porter unicode61 remove_diacritics 1"
 
 # Distance metric for the sqlite-vec table. cosine is magnitude-invariant, so
 # ranking stays correct even for vectors that aren't perfectly unit-length.
-# sqlite-vec defaults to L2, which only ranks correctly on normalized vectors —
+# sqlite-vec defaults to L2, which only ranks correctly on normalized vectors -
 # a silent footgun that produced garbage results on unnormalized embeddings.
 VEC_DISTANCE_METRIC = "cosine"
 # Bump when the vec0 table definition changes (e.g. distance metric). Vectors
@@ -207,7 +207,7 @@ class VectorStore:
 
             # 5. If the vec schema changed (e.g. distance metric), recreate the
             # vec table. Vectors live only here and can't be backfilled from the
-            # chunks table, so this empties them — the user must run
+            # chunks table, so this empties them - the user must run
             # `ragdoll reindex` to re-embed. Recreate eagerly so any new writes
             # land in a correctly-configured (cosine) table.
             stored_vec_version = con.execute(
@@ -258,7 +258,7 @@ class VectorStore:
         """Record or validate the embedding model used for this DB.
 
         On first use, stores the model name and dimension.
-        On subsequent calls, warns (via logger) if there's a mismatch —
+        On subsequent calls, warns (via logger) if there's a mismatch -
         this means the user switched models and vectors are inconsistent.
         """
         stored_model = self.get_meta("embed_model")
@@ -304,7 +304,7 @@ class VectorStore:
                          :chunk_index, :start_line, :end_line, :indexed_at)
                 """, {**c, "indexed_at": now})
                 # vec0 and fts5 virtual tables don't honour INSERT OR REPLACE
-                # predictably — use delete-then-insert for both
+                # predictably - use delete-then-insert for both
                 con.execute("DELETE FROM vec_chunks WHERE id = ?", (c["id"],))
                 con.execute(
                     "INSERT INTO vec_chunks(id, vector) VALUES (?, ?)",
@@ -360,7 +360,7 @@ class VectorStore:
         """Store a free-text note. Returns the memory ID.
 
         Args:
-            embedder: An Embedder instance. Pass one in — creating a new one per
+            embedder: An Embedder instance. Pass one in - creating a new one per
                       call works but wastes time on the lazy model load check.
         """
         if embedder is None:
@@ -505,7 +505,7 @@ class VectorStore:
                         LIMIT  ?
                     """, (fts_query, fetch_k)).fetchall()
                 except sqlite3.OperationalError:
-                    # Malformed FTS query — degrade gracefully to vector-only
+                    # Malformed FTS query - degrade gracefully to vector-only
                     logger.debug(f"FTS query failed for '{fts_query}', using vector only")
 
             # RRF fusion
@@ -721,7 +721,7 @@ class VectorStore:
     def hashes_by_index(self, source_path: str) -> dict[int, str]:
         """Return {chunk_index: content_hash} for a given source file.
 
-        Used for per-chunk incremental indexing — skip embedding chunks whose
+        Used for per-chunk incremental indexing - skip embedding chunks whose
         content hash is unchanged at the same position.
         """
         with self._conn() as con:

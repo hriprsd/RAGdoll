@@ -22,7 +22,7 @@ To register with Cursor, add to .cursor/mcp.json in your project:
     }
   }
 
-The MCP server opens the vector store directly — no daemon required.
+The MCP server opens the vector store directly - no daemon required.
 This removes a dead process risk: the watcher is a separate concern.
 If the daemon is running (for live file watching), the MCP server
 still just reads the same SQLite DB independently.
@@ -82,7 +82,7 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "What you're looking for — natural language or code snippet",
+                        "description": "What you're looking for - natural language or code snippet",
                     },
                     "top_k": {
                         "type": "integer",
@@ -134,7 +134,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
     lines: list[str] = []
     for r in results:
-        lines.append(f"### {r.source_path} (lines {r.start_line}–{r.end_line})")
+        lines.append(f"### {r.source_path} (lines {r.start_line}-{r.end_line})")
         lines.append(f"```{r.language}")
         lines.append(r.content)
         lines.append("```")

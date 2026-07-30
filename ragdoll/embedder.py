@@ -1,10 +1,10 @@
 """
-Embedder — wraps FastEmbed for fully local ONNX-based embedding.
+Embedder - wraps FastEmbed for fully local ONNX-based embedding.
 
 No PyTorch needed. Total dependency footprint: ~50 MB vs ~2 GB with sentence-transformers.
 
 Default: nomic-ai/nomic-embed-text-v1.5 (768-dim, ONNX, CPU-optimised).
-Fallback: BAAI/bge-base-en-v1.5 (768-dim) — same dimensions, no corruption risk.
+Fallback: BAAI/bge-base-en-v1.5 (768-dim) - same dimensions, no corruption risk.
 
 Hardware acceleration:
   - macOS: CoreML (Apple Neural Engine / GPU) when available
@@ -58,7 +58,7 @@ _EMBED_AREA = int(os.environ.get("RAGDOLL_EMBED_AREA", 300_000_000))
 
 # Hard cap on sequences per batch, independent of the area budget. The area
 # budget alone bounds count*max_len^2, but for very short chunks max_len is tiny
-# so it would permit tens of thousands of sequences in one batch — and onnxruntime
+# so it would permit tens of thousands of sequences in one batch - and onnxruntime
 # allocates per-sequence working buffers that blow RSS into many GB. This cap
 # keeps a batch sane even when callers hand us a large length-sorted pool of
 # short chunks. Tunable via RAGDOLL_MAX_BATCH.
@@ -72,7 +72,7 @@ def _memory_safe_batches(texts: list[str]):
     Greedy: grow a batch until adding the next chunk would exceed _EMBED_AREA
     given the batch's longest member (ONNX pads every sequence to the longest),
     or the batch would exceed _MAX_BATCH_COUNT sequences. A single chunk always
-    forms a batch even if it alone exceeds the area budget — but truncation to
+    forms a batch even if it alone exceeds the area budget - but truncation to
     _MAX_EMBED_CHARS keeps that case small too.
     """
     batch: list[str] = []
@@ -90,25 +90,25 @@ def _memory_safe_batches(texts: list[str]):
     if batch:
         yield batch
 
-# Cache size for repeated query embeddings (~2MB RAM at 768-dim × 256 queries).
+# Cache size for repeated query embeddings (~2MB RAM at 768-dim x 256 queries).
 # Helps interactive CLI and IDE autocomplete where the same query repeats.
 _QUERY_CACHE_SIZE = 256
 
 DEFAULT_MODEL = "nomic-ai/nomic-embed-text-v1.5"
 FALLBACK_MODEL = "BAAI/bge-base-en-v1.5"
-# `--fast` model — ~3× faster on CPU, half the dimension. Tradeoff: slightly
+# `--fast` model - ~3x faster on CPU, half the dimension. Tradeoff: slightly
 # weaker recall on conceptual queries. Use a separate DB file (default:
 # ~/.ragdoll/ragdoll-fast.db) so the 384-dim vectors don't collide with the
 # 768-dim ones already on disk.
 FAST_MODEL = "BAAI/bge-small-en-v1.5"
 
-# `--quantized` model — same nomic architecture and dimension (768), but
-# int8-quantized ONNX weights: ~2× faster on CPU and lighter on memory for a
+# `--quantized` model - same nomic architecture and dimension (768), but
+# int8-quantized ONNX weights: ~2x faster on CPU and lighter on memory for a
 # small recall cost. Because the vectors differ numerically from the fp32 model,
 # it uses its own DB (default: ~/.ragdoll/ragdoll-quant.db) so the two never mix.
 QUANT_MODEL = "nomic-ai/nomic-embed-text-v1.5-Q"
 
-# Model → embedding dim. Add new models here.
+# Model -> embedding dim. Add new models here.
 MODEL_DIMS: dict[str, int] = {
     DEFAULT_MODEL: 768,
     FALLBACK_MODEL: 768,
@@ -117,10 +117,10 @@ MODEL_DIMS: dict[str, int] = {
 }
 
 # Back-compat: kept so existing imports keep working. Reflects the default
-# model only — code that supports multiple models should read `embedder.dim`.
+# model only - code that supports multiple models should read `embedder.dim`.
 EXPECTED_DIM = MODEL_DIMS[DEFAULT_MODEL]
 
-# Module-level cache: model_name → TextEmbedding instance
+# Module-level cache: model_name -> TextEmbedding instance
 # Prevents reloading when multiple Embedder() calls happen (e.g. add_memory).
 _model_cache: dict[str, Any] = {}
 
@@ -170,7 +170,7 @@ def _cache_dir() -> Path:
     periodically purged, so the ~500 MB model re-downloads from HF on every
     fresh process. Pin it to ~/.cache/fastembed (honouring an explicit
     RAGDOLL_MODEL_CACHE override, or legacy FASTEMBED_CACHE_PATH) so every entry
-    point — CLI wrapper, MCP server, git hooks, tests — shares one persistent
+    point - CLI wrapper, MCP server, git hooks, tests - shares one persistent
     cache.
     """
     raw = (
@@ -181,7 +181,7 @@ def _cache_dir() -> Path:
     path = Path(raw).expanduser()
     path.mkdir(parents=True, exist_ok=True)
     # FastEmbed receives cache_dir explicitly, but HuggingFace hub internals and
-    # any direct fastembed use in-process read FASTEMBED_CACHE_PATH — keep them
+    # any direct fastembed use in-process read FASTEMBED_CACHE_PATH - keep them
     # pointed at the same dir so nothing re-downloads to a second location.
     os.environ["FASTEMBED_CACHE_PATH"] = str(path)
     return path
@@ -192,7 +192,7 @@ def _model_is_cached(cache_dir: Path, model_name: str) -> bool:
 
     Lets us pass local_files_only=True so FastEmbed skips the HuggingFace
     metadata round-trip (model_info / list_repo_tree) it otherwise performs on
-    every load — that network call is what prints "Fetching N files" even when
+    every load - that network call is what prints "Fetching N files" even when
     nothing actually needs downloading.
     """
     model_dir = cache_dir / f"models--{model_name.replace('/', '--')}"
@@ -225,7 +225,7 @@ def _default_threads() -> int | None:
     """Pick ONNX intra-op thread count for a single index run.
 
     A file lock (see indexer._index_lock) serialises ONNX inference to one
-    process at a time, so a single run can safely use most of the machine —
+    process at a time, so a single run can safely use most of the machine -
     the old `cores / 2` cap left ~half the cores idle for no reason. Prefer the
     performance-core count on Apple Silicon, else leave 2 cores for the OS/UI.
 
@@ -302,7 +302,7 @@ class Embedder:
                 cuda=has_cuda,
                 local_files_only=_model_is_cached(cache_dir, self.model_name),
                 # Release each batch's working set instead of holding the peak
-                # high-water mark for the whole run — keeps RSS low and stable
+                # high-water mark for the whole run - keeps RSS low and stable
                 # on memory-constrained machines.
                 enable_cpu_mem_arena=False,
             )
@@ -316,13 +316,13 @@ class Embedder:
                 ) from exc
             # Never silently degrade to a different model when the intended
             # model's weights are already on disk. Falling back here would embed
-            # with a different model than the rest of the DB — an incompatible
+            # with a different model than the rest of the DB - an incompatible
             # vector space that returns garbage. Fail loudly instead; the
             # fallback exists only for the genuine first-run/no-download case.
             if _model_is_cached(cache_dir, self.model_name):
                 raise RuntimeError(
                     f"'{self.model_name}' is cached at {cache_dir} but failed to "
-                    f"load: {exc}. Refusing to fall back to '{FALLBACK_MODEL}' — "
+                    f"load: {exc}. Refusing to fall back to '{FALLBACK_MODEL}' - "
                     f"mixing models corrupts the vector store. Fix the load error "
                     f"(or delete the cached model to force a clean re-download) "
                     f"rather than indexing with the wrong model."
@@ -348,7 +348,7 @@ class Embedder:
                     f"Run `ragdoll setup` with internet access to download models."
                 ) from fallback_exc
 
-        # Validate dimensions — a mismatch here would silently corrupt the DB
+        # Validate dimensions - a mismatch here would silently corrupt the DB
         test_vec = next(iter(model.embed(["dimension check"])))
         actual_dim = len(test_vec)
         if actual_dim != self._expected_dim:
@@ -374,7 +374,7 @@ class Embedder:
         (bounded by count * max_len^2). onnxruntime pads every sequence in a
         batch up to the longest member, so embedding mixed-length chunks
         together wastes compute padding short chunks. Length-sorting groups
-        similar sizes so each sub-batch is tightly packed — a big win on repos
+        similar sizes so each sub-batch is tightly packed - a big win on repos
         with a few long chunks among many short ones. Results are scattered back
         to the caller's original order, so this is invisible to callers.
         """
@@ -394,13 +394,13 @@ class Embedder:
         return out  # type: ignore[return-value]
 
     def _embed_query_uncached(self, query: str) -> tuple[float, ...]:
-        """Actual query embedding — returns a tuple so it's hashable/cacheable."""
+        """Actual query embedding - returns a tuple so it's hashable/cacheable."""
         model = self._load_model()
         vec = next(iter(model.query_embed(query)))
         return tuple(_l2_normalize(vec).tolist())
 
     def embed_query(self, query: str) -> list[float]:
-        """Embed a single search query. Cached — repeated queries are free."""
+        """Embed a single search query. Cached - repeated queries are free."""
         return list(self._cached_query(query))
 
     def clear_query_cache(self) -> None:

@@ -1,11 +1,11 @@
 """
-RAGdoll local API server — tool-agnostic HTTP interface.
+RAGdoll local API server - tool-agnostic HTTP interface.
 
 Exposes:
-  POST /search          — semantic search (used by all tool adapters)
-  POST /index           — manually trigger indexing of a path
-  GET  /status          — health + stats
-  POST /v1/embeddings   — OpenAI-compatible embeddings endpoint
+  POST /search          - semantic search (used by all tool adapters)
+  POST /index           - manually trigger indexing of a path
+  GET  /status          - health + stats
+  POST /v1/embeddings   - OpenAI-compatible embeddings endpoint
                           (works with Copilot, Continue.dev, any tool that
                           supports custom OpenAI-compatible embedding endpoints)
 
@@ -43,7 +43,7 @@ def init(indexer, embedder, store) -> None:
 def _require_ready() -> None:
     """Raise 503 if the stack hasn't been initialised yet."""
     if _indexer is None or _embedder is None or _store is None:
-        raise HTTPException(503, "RAGdoll not initialised — call init() at startup")
+        raise HTTPException(503, "RAGdoll not initialised - call init() at startup")
 
 
 # ---------------------------------------------------------------------------
@@ -70,7 +70,7 @@ async def search(req: SearchRequest):
     vec = _embedder.embed_query(req.query)
     results = _store.search(
         query_vector=vec,
-        query_text=req.query,       # ← was missing — hybrid degraded to vector-only
+        query_text=req.query,       # <- was missing - hybrid degraded to vector-only
         top_k=req.top_k,
         repo=req.repo,
         mode=req.mode,
@@ -144,6 +144,6 @@ async def oai_embeddings(req: OAIEmbeddingRequest):
         "object": "list",
         "data": data,
         "model": req.model,
-        # Token counting is intentionally omitted — we don't use a tokeniser here
+        # Token counting is intentionally omitted - we don't use a tokeniser here
         "usage": {"prompt_tokens": 0, "total_tokens": 0},
     }

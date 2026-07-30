@@ -813,3 +813,75 @@ class TestDoctorUnindexed:
         from ragdoll.cli import _scan_unindexed
         by_repo, capped = _scan_unindexed(store)
         assert by_repo == {}, f"complete index should flag nothing, got {by_repo}"
+
+
+# ---------------------------------------------------------------------------
+# Sticky model selection — DB remembers its model; flag choice is persisted
+# ---------------------------------------------------------------------------
+
+class TestStickyModel:
+    def test_config_roundtrip_and_fallback(self, tmp_path, monkeypatch):
+        import ragdoll.cli as cli
+        monkeypatch.setattr(cli, "_CONFIG_PATH", tmp_path / "config.json")
+        assert cli._read_default_mode() == "standard"  # no file yet
+        cli._write_default_mode("fast")
+        assert cli._read_default_mode() == "fast"
+        cli._write_default_mode("bogus")  # invalid ignored
+        assert cli._read_default_mode() == "fast"
+
+    def _stamped_db(self, tmp_path):
+        """Create a DB indexed with the fake embedder so its model is recorded.
+
+        Resets the process-global `_model_checked` so the stamp actually happens
+        even when an earlier test already flipped it.
+        """
+        import ragdoll.indexer as ind
+        ind._model_checked = False
+        db_path = tmp_path / "rec.db"
+        store = VectorStore(db_path)
+        src = tmp_path / "s.py"
+        src.write_text("def a():\n    return 1\n")
+        Indexer(store, _FakeEmbedder()).index_path(src)
+        return db_path
+
+    def test_db_records_model(self, tmp_path):
+        import ragdoll.cli as cli
+        db_path = self._stamped_db(tmp_path)
+        assert cli._db_recorded_model(db_path) == "test/fake-embedder"
+        assert cli._db_recorded_model(tmp_path / "nope.db") is None
+
+    def test_resolve_adopts_recorded_model(self, tmp_path, monkeypatch):
+        import ragdoll.cli as cli
+        from ragdoll.embedder import DEFAULT_MODEL
+        db_path = self._stamped_db(tmp_path)
+        # No explicit flag → existing index's model wins over the default.
+        monkeypatch.setattr(cli, "_MODE", "standard", raising=False)
+        monkeypatch.setattr(cli, "_MODE_EXPLICIT", False, raising=False)
+        assert cli._resolve_index_model(db_path) == "test/fake-embedder"
+        # Fresh DB with no record → requested (default) model.
+        assert cli._resolve_index_model(tmp_path / "fresh.db") == DEFAULT_MODEL
+
+    def test_resolve_errors_on_conflicting_flag(self, tmp_path, monkeypatch):
+        import ragdoll.cli as cli
+        import typer
+        db_path = self._stamped_db(tmp_path)
+        # Explicit --fast against a DB built with a different model → hard error.
+        monkeypatch.setattr(cli, "_MODE", "fast", raising=False)
+        monkeypatch.setattr(cli, "_MODE_EXPLICIT", True, raising=False)
+        with pytest.raises(typer.Exit) as exc:
+            cli._resolve_index_model(db_path)
+        assert exc.value.exit_code == 2
+
+    def test_callback_persists_and_reads_default(self, tmp_path, monkeypatch):
+        import ragdoll.cli as cli
+        monkeypatch.setattr(cli, "_CONFIG_PATH", tmp_path / "config.json")
+        monkeypatch.delenv("RAGDOLL_DB", raising=False)
+        # Explicit flag persists as the new default.
+        cli._root(fast=True, quantized=False, standard=False)
+        assert cli._MODE == "fast" and cli._read_default_mode() == "fast"
+        # Bare invocation now inherits the remembered default.
+        cli._root(fast=False, quantized=False, standard=False)
+        assert cli._MODE == "fast" and cli._MODE_EXPLICIT is False
+        # --standard overrides back.
+        cli._root(fast=False, quantized=False, standard=True)
+        assert cli._MODE == "standard" and cli._read_default_mode() == "standard"

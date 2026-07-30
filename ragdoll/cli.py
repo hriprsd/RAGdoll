@@ -1,5 +1,5 @@
 """
-RAGdoll CLI — local RAG memory for your dev tools.
+RAGdoll CLI - local RAG memory for your dev tools.
 
 Primary usage (no daemon needed):
   ragdoll index <path>              Index a file or directory
@@ -49,8 +49,67 @@ import os
 # Subcommands consume them via _build_stack(). We use module state instead of
 # threading typer Context everywhere because every command would otherwise need
 # the same boilerplate, and these are pure read-only switches.
-_FAST_MODE = False
+_MODE = "standard"        # standard | fast | quantized - resolved in @app.callback
+_MODE_EXPLICIT = False    # True when the user actually passed a model flag this run
+_FAST_MODE = False        # derived from _MODE; kept for existing call sites
 _QUANT_MODE = False
+
+_CONFIG_PATH = Path.home() / ".ragdoll" / "config.json"
+_VALID_MODES = ("standard", "fast", "quantized")
+
+
+def _read_default_mode() -> str:
+    """The model mode remembered from the last flagged run (or 'standard')."""
+    try:
+        import json
+        mode = json.loads(_CONFIG_PATH.read_text()).get("default_model")
+        return mode if mode in _VALID_MODES else "standard"
+    except Exception:
+        return "standard"
+
+
+def _write_default_mode(mode: str) -> None:
+    """Persist the model mode so bare commands reuse it. Best-effort - never
+    let a config write failure break the actual command."""
+    if mode not in _VALID_MODES:
+        return
+    try:
+        import json
+        _CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        data = {}
+        if _CONFIG_PATH.exists():
+            try:
+                data = json.loads(_CONFIG_PATH.read_text())
+            except Exception:
+                data = {}
+        data["default_model"] = mode
+        _CONFIG_PATH.write_text(json.dumps(data, indent=2))
+    except Exception:
+        pass
+
+
+def _mode_to_model(mode: str) -> str:
+    from .embedder import DEFAULT_MODEL, FAST_MODEL, QUANT_MODEL
+    return {"standard": DEFAULT_MODEL, "fast": FAST_MODEL, "quantized": QUANT_MODEL}[mode]
+
+
+def _db_recorded_model(db_path: Path) -> Optional[str]:
+    """The embedding model a DB was built with, or None. Read-only, no store
+    init and no model load - just a cheap sqlite peek at ragdoll_meta."""
+    if not db_path.exists():
+        return None
+    try:
+        import sqlite3
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            row = con.execute(
+                "SELECT value FROM ragdoll_meta WHERE key = 'embed_model'"
+            ).fetchone()
+        finally:
+            con.close()
+        return row[0] if row and row[0] else None
+    except Exception:
+        return None
 
 
 def _default_db(fast: bool = False, quant: bool = False) -> Path:
@@ -84,7 +143,7 @@ def _resolve_db(db: Optional[Path]) -> Path:
     top-level `--fast` callback has already pointed at the 384-dim fast store or
     the 768-dim default store. Commands bind `--db` with a None default (instead
     of capturing DEFAULT_DB at import time) so this runtime resolution sees the
-    post-callback value — otherwise `--fast` would silently write fast-model
+    post-callback value - otherwise `--fast` would silently write fast-model
     vectors into the default store.
     """
     return db if db is not None else DEFAULT_DB
@@ -93,7 +152,7 @@ def _resolve_db(db: Optional[Path]) -> Path:
 def _active_model_dim() -> int:
     """Embedding dimension for the active model (384 in --fast, else 768).
 
-    A plain dict lookup — does not load the model — so it's cheap to call when
+    A plain dict lookup - does not load the model - so it's cheap to call when
     opening a store for read-only commands.
     """
     from .embedder import DEFAULT_MODEL, FAST_MODEL, QUANT_MODEL, MODEL_DIMS
@@ -111,16 +170,25 @@ def _active_model_name() -> str:
 
 
 def _open_store(db: Optional[Path]):
-    """Open the vector store at the resolved DB path (honours --fast/--db)."""
+    """Open the vector store at the resolved DB path (honours --fast/--db).
+
+    Read-only commands don't need the model, only the right dimension - so if
+    the DB already records a model, use its dim, avoiding a spurious mismatch
+    when the user forgot the flag.
+    """
     from .store import VectorStore
-    return VectorStore(_resolve_db(db), dim=_active_model_dim())
+    from .embedder import MODEL_DIMS
+    dbp = _resolve_db(db)
+    recorded = _db_recorded_model(dbp)
+    dim = MODEL_DIMS.get(recorded, _active_model_dim()) if recorded else _active_model_dim()
+    return VectorStore(dbp, dim=dim)
 
 
 def _scan_unindexed(store, cap: int = 400) -> tuple[dict[str, int], bool]:
     """Find repo files on disk that have NO rows in the index at all.
 
     Returns ({repo_name: count}, capped). This is a cheap path-set diff of the
-    filesystem against the DB's source paths — no re-embedding. Chunkability is
+    filesystem against the DB's source paths - no re-embedding. Chunkability is
     confirmed only on candidates (files not already indexed), bounded by `cap`,
     so a healthy index stays fast and a badly-incomplete one doesn't crawl.
     Detects a partial *repo* index (killed/interrupted run) that the per-file
@@ -170,10 +238,32 @@ def _build_stack(db_path: Optional[Path]):
     from .indexer import Indexer
     from .store import VectorStore
 
-    embedder = Embedder(model_name=_active_model_name())
-    store    = VectorStore(_resolve_db(db_path), dim=embedder.dim)
+    db = _resolve_db(db_path)
+    embedder = Embedder(model_name=_resolve_index_model(db))
+    store    = VectorStore(db, dim=embedder.dim)
     indexer  = Indexer(store, embedder)
     return store, embedder, indexer
+
+
+def _resolve_index_model(db: Path) -> str:
+    """Which embedding model to use for `db`.
+
+    An existing index always uses the model it was built with - you never have
+    to remember the flag. A flag that actively contradicts the recorded model is
+    an error (it would silently mix incompatible vectors); to switch, reindex.
+    """
+    recorded = _db_recorded_model(db)
+    requested = _active_model_name()
+    if recorded:
+        if _MODE_EXPLICIT and recorded != requested:
+            console.print(
+                f"[red]This index ({db.name}) was built with '{recorded}', not "
+                f"'{requested}'. Drop the model flag to use it, or run "
+                f"'ragdoll reindex' to rebuild with the new model.[/red]"
+            )
+            raise typer.Exit(2)
+        return recorded
+    return requested
 
 
 def _daemon_base() -> str:
@@ -188,7 +278,7 @@ def _daemon_search(query: str, top_k: int, repo, mode: str, db):
 
     Skips a ~500 MB cold model load (faster, and no second model in RAM).
     Returns a list of SearchResult on success, or None if no compatible daemon
-    is reachable — the caller then falls back to loading the model locally.
+    is reachable - the caller then falls back to loading the model locally.
     """
     import json
     import urllib.request
@@ -222,7 +312,7 @@ def _daemon_search(query: str, top_k: int, repo, mode: str, db):
         with urllib.request.urlopen(req, timeout=30) as resp:
             data = json.loads(resp.read().decode())
     except Exception:
-        return None  # daemon hiccup — fall back to local
+        return None  # daemon hiccup - fall back to local
     return [SearchResult(**r) for r in data.get("results", [])]
 
 
@@ -280,29 +370,48 @@ def _root(
     fast: bool = typer.Option(
         False,
         "--fast",
-        help="Use the smaller bge-small (384-dim) model — ~3× faster, slightly weaker recall. "
+        help="Use the smaller bge-small (384-dim) model - ~3x faster, slightly weaker recall. "
              "Uses a separate DB (~/.ragdoll/ragdoll-fast.db) to avoid dim clash.",
     ),
     quantized: bool = typer.Option(
         False,
         "--quantized",
         "-q",
-        help="Use the int8-quantized nomic model (768-dim) — ~2× faster on CPU, tiny recall cost. "
+        help="Use the int8-quantized nomic model (768-dim) - ~2x faster on CPU, tiny recall cost. "
              "Uses a separate DB (~/.ragdoll/ragdoll-quant.db).",
     ),
+    standard: bool = typer.Option(
+        False,
+        "--standard",
+        help="Use the default nomic model (768-dim). Only needed to override a remembered "
+             "--fast/--quantized default.",
+    ),
 ):
-    """Top-level options applied before any subcommand runs."""
-    global _FAST_MODE, _QUANT_MODE, DEFAULT_DB
-    if fast and quantized:
-        console.print("[red]Pick one of --fast or --quantized, not both.[/red]")
+    """Top-level options applied before any subcommand runs.
+
+    Model choice is sticky: pass --fast/--quantized/--standard once and it's
+    remembered (in ~/.ragdoll/config.json) as the default for later bare
+    commands. An existing index always uses the model it was built with.
+    """
+    global _MODE, _MODE_EXPLICIT, _FAST_MODE, _QUANT_MODE, DEFAULT_DB
+    picks = [m for m, on in (("fast", fast), ("quantized", quantized), ("standard", standard)) if on]
+    if len(picks) > 1:
+        console.print("[red]Pick only one of --fast / --quantized / --standard.[/red]")
         raise typer.Exit(2)
-    _FAST_MODE = fast
-    _QUANT_MODE = quantized
+    if picks:
+        _MODE = picks[0]
+        _MODE_EXPLICIT = True
+        _write_default_mode(_MODE)  # remember last used
+    else:
+        _MODE = _read_default_mode()
+        _MODE_EXPLICIT = False
+    _FAST_MODE = _MODE == "fast"
+    _QUANT_MODE = _MODE == "quantized"
     # Re-resolve the default DB path now that we know which model is on.
     # Subcommands using `db: Path = typer.Option(None, ...)` capture the
     # value at import time, so we also update the typer default *and* let
     # _build_stack pick it up via _default_db() if a command opts in.
-    DEFAULT_DB = _default_db(fast=fast, quant=quantized)
+    DEFAULT_DB = _default_db(fast=_FAST_MODE, quant=_QUANT_MODE)
 
 
 def _relative_time(iso: Optional[str]) -> str:
@@ -343,7 +452,7 @@ def index(
 ):
     """Index a file or directory into the local vector store.
 
-    Progress display honours RAGDOLL_PROGRESS: auto (default — rich bar on a
+    Progress display honours RAGDOLL_PROGRESS: auto (default - rich bar on a
     real terminal, ASCII bar otherwise), rich, plain (force ASCII), or none.
     """
     p = path.expanduser().resolve()
@@ -416,27 +525,27 @@ def index(
         raise typer.Exit(130)
 
     if indexer._cancelled:
-        console.print(f"[yellow]Cancelled — {n} chunks indexed before stop.[/yellow]")
+        console.print(f"[yellow]Cancelled - {n} chunks indexed before stop.[/yellow]")
         raise typer.Exit(130)
     embedded = getattr(indexer, "_last_embedded", None)
     if embedded is not None:
         reused = indexer._last_reused
         unchanged = indexer._last_unchanged
         if embedded == 0 and reused == 0:
-            # Nothing to do — everything already up to date. This is the common
+            # Nothing to do - everything already up to date. This is the common
             # re-index case; spell it out so it doesn't look like a no-op bug.
             console.print(
-                f"[green]Done — nothing to embed, {unchanged} chunks already "
+                f"[green]Done - nothing to embed, {unchanged} chunks already "
                 f"up to date.[/green]"
             )
         else:
             console.print(
-                f"[green]Done — {n} chunks written "
+                f"[green]Done - {n} chunks written "
                 f"({embedded} embedded, {reused} reused"
                 f"{f', {unchanged} unchanged' if unchanged else ''}).[/green]"
             )
     else:
-        console.print(f"[green]Done — {n} chunks indexed.[/green]")
+        console.print(f"[green]Done - {n} chunks indexed.[/green]")
 
 
 # ---------------------------------------------------------------------------
@@ -563,13 +672,13 @@ def search(
         return
 
     # Print in reverse rank order so the highest-scoring result lands at the
-    # bottom of the terminal, right above the prompt — no scrolling needed.
+    # bottom of the terminal, right above the prompt - no scrolling needed.
     for rank, r in enumerate(reversed(results), start=1):
         display_rank = len(results) - rank + 1  # 1 = best
         label = (
             f"[dim italic]memory[/dim italic]"
             if r.language == "note"
-            else f"[bold]{r.source_path}[/bold]  lines {r.start_line}–{r.end_line}"
+            else f"[bold]{r.source_path}[/bold]  lines {r.start_line}-{r.end_line}"
         )
         console.rule(f"#{display_rank}  {label}  [dim]score={r.score:.4f}[/dim]")
         console.print(r.content)
@@ -591,9 +700,9 @@ def explain(
     Show per-result scoring breakdown for a hybrid search.
 
     Useful for debugging why a chunk did or didn't surface. Columns:
-      vec_rank   — position in pure vector (cosine) search
-      bm25_rank  — position in pure BM25 keyword search
-      rrf        — final Reciprocal Rank Fusion score (higher = better)
+      vec_rank   - position in pure vector (cosine) search
+      bm25_rank  - position in pure BM25 keyword search
+      rrf        - final Reciprocal Rank Fusion score (higher = better)
     """
     from .indexer import _index_lock, LockBusy
     store, embedder, _ = _build_stack(db)
@@ -618,8 +727,8 @@ def explain(
     table.add_column("rrf", justify="right", style="bold")
 
     for i, r in enumerate(rows, 1):
-        vec_r = str(r["vector_rank"]) if r["vector_rank"] else "—"
-        bm_r  = str(r["bm25_rank"]) if r["bm25_rank"] else "—"
+        vec_r = str(r["vector_rank"]) if r["vector_rank"] else "-"
+        bm_r  = str(r["bm25_rank"]) if r["bm25_rank"] else "-"
         path  = r["source_path"]
         # Shorten home-prefixed paths
         home = str(Path.home())
@@ -627,7 +736,7 @@ def explain(
             path = "~" + path[len(home):]
         table.add_row(
             str(i), path,
-            f"{r['start_line']}–{r['end_line']}",
+            f"{r['start_line']}-{r['end_line']}",
             vec_r, bm_r,
             f"{r['rrf_score']:.4f}",
         )
@@ -694,7 +803,7 @@ def list_repos(
 
     for r in repos:
         age = _relative_time(r.last_indexed)
-        stale = " [yellow]⚠[/yellow]" if _is_stale(r.last_indexed) else ""
+        stale = " [yellow](!)[/yellow]" if _is_stale(r.last_indexed) else ""
         table.add_row(
             r.repo,
             str(r.chunks),
@@ -757,7 +866,7 @@ def stats(db: Path = typer.Option(None, "--db")):
 
 @app.command()
 def status(db: Path = typer.Option(None, "--db")):
-    """Quick health check — DB size, repos, chunks, and embedding model."""
+    """Quick health check - DB size, repos, chunks, and embedding model."""
     from .store import VectorStore
 
     db = _resolve_db(db)
@@ -805,13 +914,13 @@ def remember(
     Store a free-text memory note, searchable alongside your code.
 
     Examples:
-      ragdoll remember "we use JWT not sessions — mobile client can't do cookies"
+      ragdoll remember "we use JWT not sessions - mobile client can't do cookies"
       ragdoll remember "payments service owns the DB, never query it directly" --tags arch,payments
     """
     store, embedder, _ = _build_stack(db)
     tag_list = [t.strip() for t in tags.split(",")] if tags else None
     memory_id = store.add_memory(note, tags=tag_list, embedder=embedder)
-    console.print(f"[green]Memory stored — ID: {memory_id}[/green]")
+    console.print(f"[green]Memory stored - ID: {memory_id}[/green]")
     console.print(f"[dim]Remove with: ragdoll forget {memory_id}[/dim]")
 
 
@@ -851,7 +960,7 @@ def context(
 ):
     """
     Pack the most relevant chunks into a single context block within a token budget.
-    Output is plain text — pipe it anywhere or paste into any LLM.
+    Output is plain text - pipe it anywhere or paste into any LLM.
 
     Example:
       ragdoll context "auth flow" --tokens 4000 | pbcopy
@@ -861,7 +970,7 @@ def context(
         console.print("[red]--mode must be one of: hybrid, vector, bm25[/red]")
         raise typer.Exit(1)
 
-    # Fetch generously — we'll trim to budget. Prefer the warm daemon, else
+    # Fetch generously - we'll trim to budget. Prefer the warm daemon, else
     # embed locally under the single-inference lock.
     results = None
     if not no_mem:
@@ -891,11 +1000,11 @@ def context(
     from .store import VectorStore
     results = VectorStore.deduplicate(results)
 
-    # Group by file — sort by (source_path, start_line) so contiguous chunks merge
+    # Group by file - sort by (source_path, start_line) so contiguous chunks merge
     results.sort(key=lambda r: (r.source_path, r.start_line))
 
     def _estimate_tokens(text: str) -> int:
-        """Word-count × 1.3 — more accurate than len/4 for code."""
+        """Word-count x 1.3 - more accurate than len/4 for code."""
         return math.ceil(len(text.split()) * 1.3)
 
     token_budget = tokens
@@ -907,12 +1016,12 @@ def context(
         if r.language == "note":
             header = "# [memory]\n"
         elif r.source_path != current_file:
-            # New file — full header
-            header = f"# {r.source_path}  ({r.language})\n## lines {r.start_line}–{r.end_line}\n"
+            # New file - full header
+            header = f"# {r.source_path}  ({r.language})\n## lines {r.start_line}-{r.end_line}\n"
             current_file = r.source_path
         else:
-            # Same file, additional chunk — lighter header
-            header = f"## lines {r.start_line}–{r.end_line}\n"
+            # Same file, additional chunk - lighter header
+            header = f"## lines {r.start_line}-{r.end_line}\n"
 
         block = f"{header}```{r.language}\n{r.content}\n```"
         cost  = _estimate_tokens(block)
@@ -922,7 +1031,7 @@ def context(
         used_tokens += cost
 
     output = "\n\n".join(blocks)
-    # Print raw — meant to be piped/redirected
+    # Print raw - meant to be piped/redirected
     print(output)
 
     # Show summary on stderr so it doesn't pollute the piped output
@@ -964,7 +1073,7 @@ def doctor(
         size_mb = db.stat().st_size / 1_048_576
         checks.append(("DB file", True, f"{db} ({size_mb:.1f} MB)"))
     else:
-        checks.append(("DB file", False, f"{db} does not exist — run 'ragdoll index <path>'"))
+        checks.append(("DB file", False, f"{db} does not exist - run 'ragdoll index <path>'"))
 
     # 2. DB readable + FTS version
     try:
@@ -976,7 +1085,7 @@ def doctor(
         else:
             checks.append((
                 "FTS schema", False,
-                f"v{fts_v or '?'} — expected v{FTS_SCHEMA_VERSION}. "
+                f"v{fts_v or '?'} - expected v{FTS_SCHEMA_VERSION}. "
                 f"Re-open any RAGdoll command to auto-migrate.",
             ))
     except Exception as exc:
@@ -998,18 +1107,18 @@ def doctor(
             s.connect(("127.0.0.1", port))
             checks.append(("Daemon", True, f"responding on :{port}"))
         except (ConnectionRefusedError, socket.timeout):
-            checks.append(("Daemon", True, f":{port} free — direct CLI mode OK"))
+            checks.append(("Daemon", True, f":{port} free - direct CLI mode OK"))
         except OSError as exc:
             checks.append(("Daemon", False, f"port check failed: {exc}"))
 
-    # 5. launchd agent (macOS only) — check both presence AND loaded state
+    # 5. launchd agent (macOS only) - check both presence AND loaded state
     if sys.platform == "darwin":
         import subprocess
         plist = Path.home() / "Library" / "LaunchAgents" / "com.ragdoll.daemon.plist"
         if not plist.exists():
             checks.append((
                 "launchd agent", True,
-                "not installed — run 'ragdoll autostart install' to enable",
+                "not installed - run 'ragdoll autostart install' to enable",
             ))
         else:
             res = subprocess.run(
@@ -1021,10 +1130,10 @@ def doctor(
             else:
                 checks.append((
                     "launchd agent", False,
-                    f"plist present but not loaded — try: launchctl load {plist}",
+                    f"plist present but not loaded - try: launchctl load {plist}",
                 ))
 
-    # 6. Disk space — warn if <500 MB free under ~/.ragdoll
+    # 6. Disk space - warn if <500 MB free under ~/.ragdoll
     try:
         import shutil as _shutil
         target = db.parent if db.parent.exists() else Path.home()
@@ -1054,7 +1163,7 @@ def doctor(
     except Exception:
         pass  # store may not have been opened
 
-    # 8. Partial index check — detect files where chunk count in DB doesn't
+    # 8. Partial index check - detect files where chunk count in DB doesn't
     #    match what the chunker would produce (from a killed/crashed index run)
     try:
         from .chunker import chunk_file
@@ -1097,7 +1206,7 @@ def doctor(
     except Exception as exc:
         checks.append(("Partial indexes", True, f"check skipped: {exc}"))
 
-    # 9. Unindexed files — repo files present on disk that have NO rows at all.
+    # 9. Unindexed files - repo files present on disk that have NO rows at all.
     #    The partial check above only spots files with *incomplete* chunks; a
     #    killed/interrupted index leaves whole files unindexed, which used to pass
     #    doctor silently. See _scan_unindexed for the (cheap, bounded) logic.
@@ -1108,11 +1217,11 @@ def doctor(
             detail = ", ".join(
                 f"{n}: {c}" for n, c in sorted(by_repo.items(), key=lambda x: -x[1])[:5]
             )
-            count = f"{'≥' if capped else ''}{confirmed}"
+            count = f"{'>=' if capped else ''}{confirmed}"
             checks.append((
                 "Unindexed files", False,
                 f"{count} file(s) on disk aren't in the index "
-                f"(likely a killed/incomplete index run) — {detail}. "
+                f"(likely a killed/incomplete index run) - {detail}. "
                 f"Run 'ragdoll index <repo>' to complete it.",
             ))
         else:
@@ -1177,7 +1286,7 @@ def reindex(
         total_chunks += n
         console.print(f"  {n} chunks")
 
-    console.print(f"[green]Done — {total_chunks} total chunks re-indexed.[/green]")
+    console.print(f"[green]Done - {total_chunks} total chunks re-indexed.[/green]")
 
 
 # ---------------------------------------------------------------------------
@@ -1232,18 +1341,17 @@ def import_cmd(
     Load chunks from a JSONL file into the local DB.
 
     The source file is expected to be produced by 'ragdoll export'.
-    Vectors are reused as-is — the embedding model must match the one this
+    Vectors are reused as-is - the embedding model must match the one this
     DB is bound to. We sniff the first row to verify the dimension and
     refuse the import on mismatch (rather than silently corrupting search
     quality).
     """
     import json
-    from .embedder import Embedder, DEFAULT_MODEL, FAST_MODEL
     from .store import VectorStore
 
-    # Use the active embedder's expected dim (honors --fast). Building a bare
-    # Embedder is cheap — model isn't loaded until we actually embed.
-    expected_dim = Embedder(FAST_MODEL if _FAST_MODE else DEFAULT_MODEL).dim
+    # Expected dim for the active model (honors --fast/--quantized). Plain dict
+    # lookup - no model load.
+    expected_dim = _active_model_dim()
     store = _open_store(db)
 
     # --- preflight: dim check off the first row ----------------------------
@@ -1341,7 +1449,7 @@ PLIST_TEMPLATE = """\
         <key>Crashed</key>
         <true/>
     </dict>
-    <!-- Don't relaunch faster than every 30s — protects against tight crash
+    <!-- Don't relaunch faster than every 30s - protects against tight crash
          loops from a bad config / port-in-use error. -->
     <key>ThrottleInterval</key>
     <integer>30</integer>
@@ -1528,7 +1636,7 @@ def _hook_block(db_override: str | None) -> str:
     db_arg = f' --db "{db_override}"' if db_override else ""
     return (
         f"{HOOK_BLOCK_START}\n"
-        f"# RAGdoll — auto-index on checkout/merge (managed; do not edit between markers)\n"
+        f"# RAGdoll - auto-index on checkout/merge (managed; do not edit between markers)\n"
         f'ragdoll index .{db_arg} >/dev/null 2>&1 || true\n'
         f"{HOOK_BLOCK_END}\n"
     )
@@ -1555,7 +1663,7 @@ def _write_hook(hook_path: Path, block: str) -> str:
         hook_path.chmod(0o755)
         return "updated"
 
-    # User-owned hook — append our block, preserve theirs.
+    # User-owned hook - append our block, preserve theirs.
     hook_path.write_text(existing.rstrip() + "\n\n" + block)
     hook_path.chmod(0o755)
     return "appended"
@@ -1623,7 +1731,7 @@ def hooks_uninstall(
                 hook_path.unlink()
                 console.print(f"[green]Removed {hook_path}[/green]")
         elif "RAGdoll" in existing:
-            # Pre-marker legacy install — safe to remove the whole file.
+            # Pre-marker legacy install - safe to remove the whole file.
             hook_path.unlink()
             console.print(f"[green]Removed legacy {hook_path}[/green]")
 
