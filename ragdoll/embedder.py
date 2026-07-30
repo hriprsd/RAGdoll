@@ -102,11 +102,18 @@ FALLBACK_MODEL = "BAAI/bge-base-en-v1.5"
 # 768-dim ones already on disk.
 FAST_MODEL = "BAAI/bge-small-en-v1.5"
 
+# `--quantized` model — same nomic architecture and dimension (768), but
+# int8-quantized ONNX weights: ~2× faster on CPU and lighter on memory for a
+# small recall cost. Because the vectors differ numerically from the fp32 model,
+# it uses its own DB (default: ~/.ragdoll/ragdoll-quant.db) so the two never mix.
+QUANT_MODEL = "nomic-ai/nomic-embed-text-v1.5-Q"
+
 # Model → embedding dim. Add new models here.
 MODEL_DIMS: dict[str, int] = {
     DEFAULT_MODEL: 768,
     FALLBACK_MODEL: 768,
     FAST_MODEL: 384,
+    QUANT_MODEL: 768,
 }
 
 # Back-compat: kept so existing imports keep working. Reflects the default

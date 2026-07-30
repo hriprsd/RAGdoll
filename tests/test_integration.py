@@ -636,3 +636,180 @@ class TestImportSafety:
         with pytest.raises(typer.Exit) as exc:
             import_cmd(src=bad, db=tmp_path / "fresh.db", replace=False)
         assert exc.value.exit_code == 2
+
+
+# ---------------------------------------------------------------------------
+# Cross-file content-hash dedup — embed identical chunks once per run
+# ---------------------------------------------------------------------------
+
+class TestCrossFileDedup:
+    def _boiler(self) -> str:
+        # A chunk that will be byte-identical across every file.
+        return "# Copyright ACME\n# Licensed MIT\n" + "\n".join(f"k{i}=1" for i in range(30))
+
+    def test_identical_chunks_across_files_embed_once(self, tmp_path):
+        """Boilerplate repeated across files should be embedded once, reused elsewhere."""
+        db_path = tmp_path / "dedup.db"
+        store = VectorStore(db_path)
+        embedder = _FakeEmbedder()
+        indexer = Indexer(store, embedder)
+
+        boiler = self._boiler()
+        for i in range(3):
+            (tmp_path / f"f{i}.py").write_text(boiler + f"\n\ndef uniq_{i}():\n    return {i}\n")
+
+        call_count = {"n": 0}
+        original = embedder.embed
+        def counting(texts):
+            call_count["n"] += len(texts)
+            return original(texts)
+        embedder.embed = counting
+
+        written = indexer.index_path(tmp_path)
+        # 3 files x (1 shared boiler chunk + 1 unique chunk) = 6 rows written
+        assert written == 6
+        # Shared chunk embedded once; 2 duplicate copies reused, not re-embedded.
+        assert indexer._last_embedded == 4
+        assert indexer._last_reused == 2
+        assert call_count["n"] == 4, f"model saw {call_count['n']} texts, expected 4"
+
+    def test_reindex_after_dedup_embeds_nothing(self, tmp_path):
+        """A clean re-index of a deduped tree must not re-embed anything."""
+        db_path = tmp_path / "dedup.db"
+        store = VectorStore(db_path)
+        embedder = _FakeEmbedder()
+        indexer = Indexer(store, embedder)
+        boiler = self._boiler()
+        for i in range(3):
+            (tmp_path / f"f{i}.py").write_text(boiler + f"\n\ndef uniq_{i}():\n    return {i}\n")
+        indexer.index_path(tmp_path)
+
+        call_count = {"n": 0}
+        original = embedder.embed
+        def counting(texts):
+            call_count["n"] += len(texts)
+            return original(texts)
+        embedder.embed = counting
+
+        written = indexer.index_path(tmp_path)
+        assert written == 0
+        assert call_count["n"] == 0
+        assert indexer._last_unchanged == 6
+
+
+# ---------------------------------------------------------------------------
+# Per-run stats — embedded vs reused vs unchanged reporting
+# ---------------------------------------------------------------------------
+
+class TestIndexStats:
+    def test_stats_reset_and_report_on_fresh_index(self, tmp_path):
+        db_path = tmp_path / "stats.db"
+        store = VectorStore(db_path)
+        embedder = _FakeEmbedder()
+        indexer = Indexer(store, embedder)
+        src = tmp_path / "s.py"
+        src.write_text("def a():\n    return 1\n\ndef b():\n    return 2\n")
+
+        n = indexer.index_path(src)
+        assert n == indexer._last_embedded + indexer._last_reused
+        assert indexer._last_embedded > 0
+        assert indexer._last_unchanged == 0
+
+        # Second pass: all unchanged, stats reset, nothing embedded/reused.
+        indexer.index_path(src)
+        assert indexer._last_embedded == 0
+        assert indexer._last_reused == 0
+        assert indexer._last_unchanged > 0
+
+
+# ---------------------------------------------------------------------------
+# Throttle knob
+# ---------------------------------------------------------------------------
+
+class TestThrottle:
+    def test_env_parsing(self, monkeypatch):
+        from ragdoll.indexer import _embed_throttle
+        monkeypatch.delenv("RAGDOLL_THROTTLE_MS", raising=False)
+        assert _embed_throttle() == 0.0
+        monkeypatch.setenv("RAGDOLL_THROTTLE_MS", "250")
+        assert _embed_throttle() == 0.25
+        monkeypatch.setenv("RAGDOLL_THROTTLE_MS", "garbage")
+        assert _embed_throttle() == 0.0
+
+    def test_throttle_sleeps_between_batches(self, tmp_path, monkeypatch):
+        db_path = tmp_path / "t.db"
+        store = VectorStore(db_path)
+        embedder = _FakeEmbedder()
+        indexer = Indexer(store, embedder)
+        src = tmp_path / "s.py"
+        src.write_text("def a():\n    return 1\n")
+
+        slept = {"total": 0.0}
+        import ragdoll.indexer as ind
+        monkeypatch.setattr(ind.time, "sleep", lambda s: slept.__setitem__("total", slept["total"] + s))
+        monkeypatch.setenv("RAGDOLL_THROTTLE_MS", "100")
+
+        indexer.index_path(src)
+        assert slept["total"] >= 0.1, "throttle should sleep after embedding"
+
+
+# ---------------------------------------------------------------------------
+# Quantized model wiring
+# ---------------------------------------------------------------------------
+
+class TestQuantizedModel:
+    def test_dim_and_name(self):
+        from ragdoll.embedder import QUANT_MODEL, MODEL_DIMS
+        assert MODEL_DIMS[QUANT_MODEL] == 768
+
+    def test_active_model_and_db_selection(self, monkeypatch):
+        import ragdoll.cli as cli
+        from ragdoll.embedder import QUANT_MODEL, FAST_MODEL, DEFAULT_MODEL
+        monkeypatch.delenv("RAGDOLL_DB", raising=False)
+
+        monkeypatch.setattr(cli, "_QUANT_MODE", True, raising=False)
+        monkeypatch.setattr(cli, "_FAST_MODE", False, raising=False)
+        assert cli._active_model_name() == QUANT_MODEL
+        assert cli._default_db(quant=True).name == "ragdoll-quant.db"
+
+        monkeypatch.setattr(cli, "_QUANT_MODE", False, raising=False)
+        assert cli._active_model_name() == DEFAULT_MODEL
+        assert cli._default_db().name == "ragdoll.db"
+
+
+# ---------------------------------------------------------------------------
+# Doctor — unindexed-files detection (partial *repo* index)
+# ---------------------------------------------------------------------------
+
+class TestDoctorUnindexed:
+    def test_flags_files_not_in_index(self, tmp_path):
+        # Build a repo with two chunkable files but index only one of them.
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / "a.py").write_text("def a():\n    return 1\n")
+        (repo / "b.py").write_text("def b():\n    return 2\n")
+
+        db_path = tmp_path / "doc.db"
+        store = VectorStore(db_path)
+        indexer = Indexer(store, _FakeEmbedder())
+        indexer.index_path(repo / "a.py")  # only a.py indexed; b.py missing
+
+        from ragdoll.cli import _scan_unindexed
+        by_repo, capped = _scan_unindexed(store)
+        assert not capped
+        assert by_repo.get("repo") == 1, f"expected b.py flagged, got {by_repo}"
+
+    def test_complete_index_flags_nothing(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / "a.py").write_text("def a():\n    return 1\n")
+        (repo / "b.py").write_text("def b():\n    return 2\n")
+
+        db_path = tmp_path / "doc.db"
+        store = VectorStore(db_path)
+        indexer = Indexer(store, _FakeEmbedder())
+        indexer.index_path(repo)  # index everything
+
+        from ragdoll.cli import _scan_unindexed
+        by_repo, capped = _scan_unindexed(store)
+        assert by_repo == {}, f"complete index should flag nothing, got {by_repo}"

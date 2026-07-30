@@ -50,19 +50,26 @@ import os
 # threading typer Context everywhere because every command would otherwise need
 # the same boilerplate, and these are pure read-only switches.
 _FAST_MODE = False
+_QUANT_MODE = False
 
 
-def _default_db(fast: bool = False) -> Path:
+def _default_db(fast: bool = False, quant: bool = False) -> Path:
     """Resolve the default DB path, respecting the RAGDOLL_DB env var.
 
-    `fast=True` picks a separate file so 384-dim and 768-dim vectors never
-    share a store (sqlite-vec would refuse, and silent corruption would be
-    worse). Override either with RAGDOLL_DB.
+    `fast=True` / `quant=True` each pick a separate file so vectors from
+    different models never share a store (sqlite-vec would refuse a dim clash,
+    and mixing models' vectors would silently corrupt similarity). Override any
+    of them with RAGDOLL_DB.
     """
     env = os.environ.get("RAGDOLL_DB")
     if env:
         return Path(env).expanduser()
-    name = "ragdoll-fast.db" if fast else "ragdoll.db"
+    if fast:
+        name = "ragdoll-fast.db"
+    elif quant:
+        name = "ragdoll-quant.db"
+    else:
+        name = "ragdoll.db"
     return Path.home() / ".ragdoll" / name
 
 
@@ -89,8 +96,18 @@ def _active_model_dim() -> int:
     A plain dict lookup — does not load the model — so it's cheap to call when
     opening a store for read-only commands.
     """
-    from .embedder import DEFAULT_MODEL, FAST_MODEL, MODEL_DIMS
-    return MODEL_DIMS[FAST_MODEL if _FAST_MODE else DEFAULT_MODEL]
+    from .embedder import DEFAULT_MODEL, FAST_MODEL, QUANT_MODEL, MODEL_DIMS
+    return MODEL_DIMS[_active_model_name()]
+
+
+def _active_model_name() -> str:
+    """The embedding model selected by the top-level --fast/--quantized flags."""
+    from .embedder import DEFAULT_MODEL, FAST_MODEL, QUANT_MODEL
+    if _FAST_MODE:
+        return FAST_MODEL
+    if _QUANT_MODE:
+        return QUANT_MODEL
+    return DEFAULT_MODEL
 
 
 def _open_store(db: Optional[Path]):
@@ -99,13 +116,61 @@ def _open_store(db: Optional[Path]):
     return VectorStore(_resolve_db(db), dim=_active_model_dim())
 
 
+def _scan_unindexed(store, cap: int = 400) -> tuple[dict[str, int], bool]:
+    """Find repo files on disk that have NO rows in the index at all.
+
+    Returns ({repo_name: count}, capped). This is a cheap path-set diff of the
+    filesystem against the DB's source paths — no re-embedding. Chunkability is
+    confirmed only on candidates (files not already indexed), bounded by `cap`,
+    so a healthy index stays fast and a badly-incomplete one doesn't crawl.
+    Detects a partial *repo* index (killed/interrupted run) that the per-file
+    partial-chunk check in `doctor` can't see.
+    """
+    import os as _os
+    from .chunker import chunk_file, should_skip, MAX_FILE_SIZE, SKIP_DIRS
+    from .indexer import _canonical_path
+
+    indexed_paths = set(store.chunk_counts_by_file().keys())
+    by_repo: dict[str, int] = {}
+    confirmed = 0
+    capped = False
+    for summary in store.list_repos():
+        root = Path(summary.repo)
+        if not root.exists():
+            continue
+        for dp, dn, fn in _os.walk(root, followlinks=False):
+            dn[:] = [d for d in dn if d not in SKIP_DIRS and not d.startswith(".")]
+            for name in fn:
+                p = Path(dp) / name
+                if p.is_symlink() or should_skip(p):
+                    continue
+                try:
+                    size = p.stat().st_size
+                except OSError:
+                    continue
+                if size == 0 or size > MAX_FILE_SIZE:
+                    continue
+                if str(_canonical_path(p)) in indexed_paths:
+                    continue
+                if confirmed >= cap:
+                    capped = True
+                    break
+                if chunk_file(p):
+                    confirmed += 1
+                    by_repo[root.name] = by_repo.get(root.name, 0) + 1
+            if capped:
+                break
+        if capped:
+            break
+    return by_repo, capped
+
+
 def _build_stack(db_path: Optional[Path]):
-    from .embedder import Embedder, DEFAULT_MODEL, FAST_MODEL
+    from .embedder import Embedder
     from .indexer import Indexer
     from .store import VectorStore
 
-    model = FAST_MODEL if _FAST_MODE else DEFAULT_MODEL
-    embedder = Embedder(model_name=model)
+    embedder = Embedder(model_name=_active_model_name())
     store    = VectorStore(_resolve_db(db_path), dim=embedder.dim)
     indexer  = Indexer(store, embedder)
     return store, embedder, indexer
@@ -218,15 +283,26 @@ def _root(
         help="Use the smaller bge-small (384-dim) model — ~3× faster, slightly weaker recall. "
              "Uses a separate DB (~/.ragdoll/ragdoll-fast.db) to avoid dim clash.",
     ),
+    quantized: bool = typer.Option(
+        False,
+        "--quantized",
+        "-q",
+        help="Use the int8-quantized nomic model (768-dim) — ~2× faster on CPU, tiny recall cost. "
+             "Uses a separate DB (~/.ragdoll/ragdoll-quant.db).",
+    ),
 ):
     """Top-level options applied before any subcommand runs."""
-    global _FAST_MODE, DEFAULT_DB
+    global _FAST_MODE, _QUANT_MODE, DEFAULT_DB
+    if fast and quantized:
+        console.print("[red]Pick one of --fast or --quantized, not both.[/red]")
+        raise typer.Exit(2)
     _FAST_MODE = fast
-    # Re-resolve the default DB path now that we know whether fast is on.
+    _QUANT_MODE = quantized
+    # Re-resolve the default DB path now that we know which model is on.
     # Subcommands using `db: Path = typer.Option(None, ...)` capture the
     # value at import time, so we also update the typer default *and* let
     # _build_stack pick it up via _default_db() if a command opts in.
-    DEFAULT_DB = _default_db(fast=fast)
+    DEFAULT_DB = _default_db(fast=fast, quant=quantized)
 
 
 def _relative_time(iso: Optional[str]) -> str:
@@ -259,6 +335,11 @@ def _ascii_bar(done: int, total: int, width: int = 32) -> str:
 def index(
     path: Path = typer.Argument(..., help="File or directory to index"),
     db:   Path = typer.Option(None, "--db", help="Path to SQLite DB"),
+    throttle: int = typer.Option(
+        0, "--throttle",
+        help="Sleep N ms between embed batches to keep CPU load/heat down on a big index "
+             "(slower wall-clock, cooler machine). Also settable via RAGDOLL_THROTTLE_MS.",
+    ),
 ):
     """Index a file or directory into the local vector store.
 
@@ -269,6 +350,8 @@ def index(
     if not p.exists():
         console.print(f"[red]Path not found: {p}[/red]")
         raise typer.Exit(1)
+    if throttle:
+        os.environ["RAGDOLL_THROTTLE_MS"] = str(throttle)
     from .indexer import LockBusy
     store, embedder, indexer = _build_stack(db)
 
@@ -335,7 +418,25 @@ def index(
     if indexer._cancelled:
         console.print(f"[yellow]Cancelled — {n} chunks indexed before stop.[/yellow]")
         raise typer.Exit(130)
-    console.print(f"[green]Done — {n} chunks indexed.[/green]")
+    embedded = getattr(indexer, "_last_embedded", None)
+    if embedded is not None:
+        reused = indexer._last_reused
+        unchanged = indexer._last_unchanged
+        if embedded == 0 and reused == 0:
+            # Nothing to do — everything already up to date. This is the common
+            # re-index case; spell it out so it doesn't look like a no-op bug.
+            console.print(
+                f"[green]Done — nothing to embed, {unchanged} chunks already "
+                f"up to date.[/green]"
+            )
+        else:
+            console.print(
+                f"[green]Done — {n} chunks written "
+                f"({embedded} embedded, {reused} reused"
+                f"{f', {unchanged} unchanged' if unchanged else ''}).[/green]"
+            )
+    else:
+        console.print(f"[green]Done — {n} chunks indexed.[/green]")
 
 
 # ---------------------------------------------------------------------------
@@ -995,6 +1096,29 @@ def doctor(
             checks.append(("Partial indexes", True, f"checked {sampled} files, all complete"))
     except Exception as exc:
         checks.append(("Partial indexes", True, f"check skipped: {exc}"))
+
+    # 9. Unindexed files — repo files present on disk that have NO rows at all.
+    #    The partial check above only spots files with *incomplete* chunks; a
+    #    killed/interrupted index leaves whole files unindexed, which used to pass
+    #    doctor silently. See _scan_unindexed for the (cheap, bounded) logic.
+    try:
+        by_repo, capped = _scan_unindexed(store)
+        confirmed = sum(by_repo.values())
+        if confirmed:
+            detail = ", ".join(
+                f"{n}: {c}" for n, c in sorted(by_repo.items(), key=lambda x: -x[1])[:5]
+            )
+            count = f"{'≥' if capped else ''}{confirmed}"
+            checks.append((
+                "Unindexed files", False,
+                f"{count} file(s) on disk aren't in the index "
+                f"(likely a killed/incomplete index run) — {detail}. "
+                f"Run 'ragdoll index <repo>' to complete it.",
+            ))
+        else:
+            checks.append(("Unindexed files", True, "all on-disk files are indexed"))
+    except Exception as exc:
+        checks.append(("Unindexed files", True, f"check skipped: {exc}"))
 
     # Render
     table = Table(box=box.SIMPLE_HEAVY, title="RAGdoll Doctor")

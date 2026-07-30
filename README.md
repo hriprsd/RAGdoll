@@ -207,7 +207,30 @@ The uninstaller will:
 ragdoll index ~/my-project
 ```
 
-Shows a progress bar for directories. Skips unchanged files via content hashing.
+Shows a progress bar for directories. Skips unchanged files via content hashing, and
+**embeds each unique chunk only once per run** — identical boilerplate repeated across files
+(license headers, shared templates, vendored snippets) reuses one vector instead of
+re-embedding every copy. On completion it reports the split, e.g.
+`Done — 812 chunks written (640 embedded, 172 reused)`, so a resume of a partial index no
+longer looks like a full rebuild.
+
+#### Faster / cooler indexing on big repos
+
+The first full index of a large repo is CPU-heavy (it embeds everything once). Levers:
+
+```bash
+ragdoll --quantized index ~/my-project     # int8 nomic (768-dim): ~2× faster on CPU, tiny recall cost
+ragdoll --fast index ~/my-project          # bge-small (384-dim): ~3× faster, slightly weaker recall
+ragdoll index ~/my-project --throttle 150  # sleep 150ms between batches — cooler, responsive, slower
+```
+
+`--quantized` and `--fast` each use their own DB (`~/.ragdoll/ragdoll-quant.db`,
+`~/.ragdoll/ragdoll-fast.db`) so different-model vectors never mix. `--throttle` is also settable
+via `RAGDOLL_THROTTLE_MS`. On macOS, `taskpolicy -b ragdoll index …` runs it at background
+priority (efficiency cores) so your machine stays responsive.
+
+Once a repo is indexed, keep it fresh incrementally with the [daemon watcher](#run-the-server-daemon)
+instead of re-running big batches.
 
 ### Search
 
@@ -511,7 +534,7 @@ Run `ragdoll status` to see your detected configuration (accelerator, threads, b
 
 ## Troubleshooting
 
-Run `ragdoll doctor` first. It covers DB readability, FTS schema version, embedding model loadability, daemon port, launchd agent status, free disk space, embedding-dim mismatch, partial indexes, and deleted files.
+Run `ragdoll doctor` first. It covers DB readability, FTS schema version, embedding model loadability, daemon port, launchd agent status, free disk space, embedding-dim mismatch, partial indexes (files with incomplete chunks), **unindexed files** (whole files on disk missing from the index, e.g. from a killed run), and deleted files.
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
