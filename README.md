@@ -610,10 +610,11 @@ ragdoll/
 
 ## Deep dive
 
-I wrote a two-part series on Medium about the thinking and tradeoffs behind RAGdoll:
+I wrote a three-part series on Medium about the thinking and tradeoffs behind RAGdoll:
 
 1. **[I Built a Local RAG Engine Because My AI Tools Keep Forgetting Everything](https://medium.com/@hriprsd/i-built-a-local-rag-engine-because-my-ai-tools-keep-forgetting-everything-6f6a550817d5)** - what it does, why it exists, and how it fits alongside tools like Cursor/Claude/Copilot
 2. **[Building RAGdoll Part 2: ONNX, Hybrid Search, and Why I Skipped PyTorch](https://medium.com/@hriprsd/building-ragdoll-part-2-onnx-hybrid-search-and-why-i-skipped-pytorch-f33e967f0912)** - ONNX vs PyTorch, how the embedding pipeline works, hybrid search internals, and lessons learned
+3. **[Building RAGdoll Part 3: What Happened When I Indexed a 10,000-File Repo](https://medium.com/@hriprsd/building-ragdoll-part-3-what-happened-when-i-indexed-a-10-000-file-repo-436d35bcdd1e)** - the CoreML meltdown, global chunk dedup, honest index reporting, and keeping a big index cool on a laptop
 
 ---
 
