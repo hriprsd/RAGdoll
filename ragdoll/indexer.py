@@ -12,6 +12,7 @@ Memory safety:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import queue
@@ -134,6 +135,38 @@ EMBED_WINDOW = int(os.environ.get("RAGDOLL_EMBED_WINDOW", max(BATCH_SIZE * 8, 10
 # On a 24 GB machine with normal app usage, that's a guaranteed OOM.
 
 _LOCK_PATH = Path(os.environ.get("RAGDOLL_HOME", Path.home() / ".ragdoll")) / ".index.lock"
+
+# Heartbeat file a running index writes so `ragdoll status` can report live
+# progress (repo, files done/total, PID to kill). Best-effort: any IO error is
+# swallowed so a status write never breaks an index run.
+_STATUS_PATH = Path(os.environ.get("RAGDOLL_HOME", Path.home() / ".ragdoll")) / "index.status"
+
+
+def _write_status(repo: str, done: int, total: int) -> None:
+    """Atomically update the index heartbeat file. Never raises."""
+    try:
+        _STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _STATUS_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps({
+            "pid": os.getpid(),
+            "repo": repo,
+            "done": done,
+            "total": total,
+            "updated_at": time.time(),
+        }))
+        tmp.replace(_STATUS_PATH)
+    except Exception:
+        pass
+
+
+def _clear_status() -> None:
+    """Remove the heartbeat file when a run ends. Never raises."""
+    try:
+        _STATUS_PATH.unlink()
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
 
 # How long a second process waits for the ONNX inference lock before giving up.
 # Overridable so power users on beefier machines can wait longer if they want to
@@ -380,6 +413,9 @@ class Indexer:
                 if not files:
                     return 0
 
+                self._status_repo = path.name
+                _write_status(path.name, 0, total)
+
                 # Preload per-chunk hashes AND existing vectors keyed by content hash
                 # in one query each - lets the indexer skip embedding any chunk whose
                 # content is unchanged (even when its *position* in the file shifted).
@@ -388,6 +424,7 @@ class Indexer:
 
                 return self._index_dir(files, total, all_hashes, all_vectors, progress)
             finally:
+                _clear_status()
                 # Release ONNX model memory immediately. Without this,
                 # the model weights (~500 MB) and inference buffers stay
                 # resident until process exit, which is the main cause of
@@ -431,6 +468,8 @@ class Indexer:
         embed_buf: list = []  # (path, repo, idx, rc, hash)
         indexed = 0
         files_done = 0
+        status_repo = getattr(self, "_status_repo", "")
+        last_status = 0.0
 
         # Global content-hash -> vector cache. Seeded from every vector already in
         # the DB, then grown as we embed. Lets identical chunks (boilerplate
@@ -498,6 +537,13 @@ class Indexer:
 
                 if progress:
                     progress(files_done, total)
+
+                # Heartbeat for `ragdoll status`, throttled to ~1/sec so a big
+                # repo doesn't hammer the filesystem.
+                now = time.monotonic()
+                if now - last_status >= 1.0:
+                    _write_status(status_repo, files_done, total)
+                    last_status = now
 
                 if self._cancelled:
                     logger.warning(

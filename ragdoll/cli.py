@@ -864,10 +864,64 @@ def stats(db: Path = typer.Option(None, "--db")):
 # status
 # ---------------------------------------------------------------------------
 
+def _print_running_index() -> None:
+    """Print a live index run (repo, % done, PID) if one is active.
+
+    Reads the heartbeat file the indexer keeps. A dead PID means a crashed or
+    killed run, so we clean the stale marker and stay quiet.
+    """
+    import json
+    import time as _time
+    from rich.panel import Panel
+    from .indexer import _STATUS_PATH
+
+    try:
+        st = json.loads(_STATUS_PATH.read_text())
+    except (FileNotFoundError, OSError, ValueError):
+        return
+
+    pid = st.get("pid")
+    alive = False
+    if isinstance(pid, int):
+        try:
+            import psutil  # type: ignore
+            alive = psutil.pid_exists(pid)
+        except Exception:
+            try:
+                os.kill(pid, 0)
+                alive = True
+            except OSError:
+                alive = False
+
+    if not alive:
+        try:
+            _STATUS_PATH.unlink()
+        except OSError:
+            pass
+        return
+
+    done = st.get("done", 0)
+    total = st.get("total", 0) or 0
+    pct = f"{done * 100 // total}%" if total else "?"
+    repo = st.get("repo", "?")
+    stale = "  [dim](no update >30s, may be stalled)[/dim]" if _time.time() - st.get("updated_at", 0) > 30 else ""
+    console.print(Panel(
+        f"[bold]Indexing[/bold]  {repo}\n"
+        f"[bold]Progress[/bold]  {done}/{total} files ({pct}){stale}\n"
+        f"[bold]PID[/bold]       {pid}   [dim]stop with:[/dim] kill {pid}",
+        title="[yellow]Index running[/yellow]", border_style="yellow", expand=False,
+    ))
+
+
 @app.command()
 def status(db: Path = typer.Option(None, "--db")):
-    """Quick health check - DB size, repos, chunks, and embedding model."""
+    """Quick health check - DB size, repos, chunks, and embedding model.
+
+    Also reports a live index run (repo, % done, PID to kill) if one is active.
+    """
     from .store import VectorStore
+
+    _print_running_index()
 
     db = _resolve_db(db)
     store = _open_store(db)

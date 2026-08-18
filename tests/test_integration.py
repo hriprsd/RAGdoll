@@ -885,3 +885,56 @@ class TestStickyModel:
         # --standard overrides back.
         cli._root(fast=False, quantized=False, standard=True)
         assert cli._MODE == "standard" and cli._read_default_mode() == "standard"
+
+
+class TestIndexStatusHeartbeat:
+    """The heartbeat file that powers `ragdoll status` live progress."""
+
+    def test_write_and_clear_roundtrip(self, tmp_path, monkeypatch):
+        import json
+        import os
+        import ragdoll.indexer as ind
+        sp = tmp_path / "index.status"
+        monkeypatch.setattr(ind, "_STATUS_PATH", sp)
+
+        ind._write_status("myrepo", 3, 10)
+        data = json.loads(sp.read_text())
+        assert data["repo"] == "myrepo"
+        assert data["done"] == 3 and data["total"] == 10
+        assert data["pid"] == os.getpid()
+
+        ind._clear_status()
+        assert not sp.exists()
+
+    def test_clear_missing_is_safe(self, tmp_path, monkeypatch):
+        import ragdoll.indexer as ind
+        monkeypatch.setattr(ind, "_STATUS_PATH", tmp_path / "nope.status")
+        ind._clear_status()  # must not raise
+
+    def test_status_dead_pid_is_cleaned(self, tmp_path, monkeypatch):
+        import json
+        import time
+        import ragdoll.indexer as ind
+        from ragdoll.cli import _print_running_index
+        sp = tmp_path / "index.status"
+        monkeypatch.setattr(ind, "_STATUS_PATH", sp)
+        # PID 999999 is not a real process -> stale marker gets removed.
+        sp.write_text(json.dumps(
+            {"pid": 999999, "repo": "x", "done": 1, "total": 2, "updated_at": time.time()}
+        ))
+        _print_running_index()
+        assert not sp.exists()
+
+    def test_status_live_pid_is_kept(self, tmp_path, monkeypatch):
+        import json
+        import os
+        import time
+        import ragdoll.indexer as ind
+        from ragdoll.cli import _print_running_index
+        sp = tmp_path / "index.status"
+        monkeypatch.setattr(ind, "_STATUS_PATH", sp)
+        sp.write_text(json.dumps(
+            {"pid": os.getpid(), "repo": "x", "done": 1, "total": 2, "updated_at": time.time()}
+        ))
+        _print_running_index()
+        assert sp.exists()

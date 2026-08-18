@@ -198,6 +198,21 @@ ragdoll stats             # breakdown by repo and language
 ragdoll status            # DB size, repo count, model info
 ```
 
+If an index is running (even in another terminal), `ragdoll status` shows it live,
+with the repo, percent done, and the PID to kill if you want to stop it:
+
+```
+╭───────────── Index running ─────────────╮
+│ Indexing  helm-charts                   │
+│ Progress  830/1275 files (65%)          │
+│ PID       79155   stop with: kill 79155 │
+╰─────────────────────────────────────────╯
+```
+
+The progress comes from a heartbeat file (`~/.ragdoll/index.status`) the indexer
+keeps while it runs; a crashed run leaves a stale marker that `status` cleans up on
+its own.
+
 ### Remove from the index
 
 ```bash
