@@ -360,8 +360,13 @@ RAGdoll is designed to run on developer laptops (8-32 GB RAM) without choking yo
 | **Single-inference lock** | File lock at `~/.ragdoll/.index.lock` ensures only one ragdoll process runs ONNX inference at a time - now covering **search and context**, not just index. A second process prints a one-line notice, waits up to `RAGDOLL_LOCK_TIMEOUT` seconds (default 120), then **fails fast** with a clear message instead of blocking silently or loading a second ~500 MB model |
 | **Warm daemon reuse** | When `ragdoll serve` is running, `ragdoll search` / `ragdoll context` route to its already-loaded model over HTTP, skipping the cold load entirely (and never holding two models in RAM) |
 | **Model unload** | ONNX model and C-level buffers are explicitly released after indexing completes, instead of holding memory until process exit |
+| **Sequence-length cap** | Chunks are truncated to `RAGDOLL_MAX_EMBED_CHARS` (default 2048) *for embedding only* - the full text is still stored and keyword-searchable. Attention is O(seq^2), so an uncapped dense chunk could tokenize to ~8000 tokens and needed ~12 GB alone; this cap keeps a large-repo index bounded (~2.5 GB peak). Raise it on a high-memory machine for better long-chunk recall |
+| **Padded-batch budget** | Batches are bounded by both a count cap (`RAGDOLL_MAX_BATCH`, default 16) and a padded-area budget `count * max_len^2 <= RAGDOLL_EMBED_AREA` (default 1e7), since ONNX pads every sequence to the longest in the batch. Length-sorted so short chunks still pack tightly |
 
 Run `ragdoll status` to see your detected configuration (accelerator, threads, batch size).
+
+> **Indexing a huge repo?** The defaults above keep peak RSS ~2-3 GB. On a 32 GB+
+> machine you can trade RAM for speed: `RAGDOLL_EMBED_AREA=1e8 RAGDOLL_MAX_BATCH=64 ragdoll index …`.
 
 ---
 

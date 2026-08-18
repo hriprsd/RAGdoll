@@ -46,15 +46,25 @@ def _l2_normalize(vec: Any) -> "np.ndarray":
 # the chunker) would spike onnxruntime memory. Matches the chunker's
 # MAX_CHUNK_CHARS; kept here as defence-in-depth so the embedder is safe no
 # matter what it's handed.
-_MAX_EMBED_CHARS = 8000
+# Cap on chars sent to the model per chunk. This also caps the worst-case
+# token sequence length (~1 token/char for dense code/text), which is what
+# actually bounds memory: transformer attention is O(seq^2), so a single
+# 8000-char chunk of dense content tokenizes to ~8000 tokens and needed ~12 GB
+# to embed - one chunk was enough to OOM a large-repo index. 2048 chars keeps
+# ~90% of real chunks intact (measured p90 ~1900 chars) while bounding the
+# worst case hard. The full chunk text is still stored and keyword-searchable;
+# only the embedding sees the head. Bump RAGDOLL_MAX_EMBED_CHARS on a
+# high-memory machine to embed more of very long chunks.
+_MAX_EMBED_CHARS = int(os.environ.get("RAGDOLL_MAX_EMBED_CHARS", 2048))
 
 # Peak ONNX working memory for a batch scales ~ batch_count * seq_len^2. Bound
 # that product (in chars^2) so a batch of many large chunks can't blow up RAM.
-# Indexing a big C/C++ repo previously pushed RSS into tens of GB + swap because
-# 64 near-max chunks were embedded in one padded batch. ~3e8 keeps a worst-case
-# batch (all 8000-char chunks) to a handful of items, while small chunks still
-# batch freely. Tunable via RAGDOLL_EMBED_AREA.
-_EMBED_AREA = int(os.environ.get("RAGDOLL_EMBED_AREA", 300_000_000))
+# Indexing a large repo previously pushed RSS to 12+ GB + swap (and OOM-killed
+# the run) because dozens of near-max chunks were embedded in one padded batch.
+# 1e7 keeps a worst-case batch (all 2048-char chunks) to ~2 items while small
+# chunks still batch freely; measured ~2.5 GB peak vs 12.5 GB before. Raise
+# RAGDOLL_EMBED_AREA on a high-memory machine to trade RAM for throughput.
+_EMBED_AREA = int(os.environ.get("RAGDOLL_EMBED_AREA", 10_000_000))
 
 # Hard cap on sequences per batch, independent of the area budget. The area
 # budget alone bounds count*max_len^2, but for very short chunks max_len is tiny
@@ -62,7 +72,7 @@ _EMBED_AREA = int(os.environ.get("RAGDOLL_EMBED_AREA", 300_000_000))
 # allocates per-sequence working buffers that blow RSS into many GB. This cap
 # keeps a batch sane even when callers hand us a large length-sorted pool of
 # short chunks. Tunable via RAGDOLL_MAX_BATCH.
-_MAX_BATCH_COUNT = int(os.environ.get("RAGDOLL_MAX_BATCH", 256))
+_MAX_BATCH_COUNT = int(os.environ.get("RAGDOLL_MAX_BATCH", 16))
 
 
 def _memory_safe_batches(texts: list[str]):

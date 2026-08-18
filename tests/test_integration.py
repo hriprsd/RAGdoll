@@ -938,3 +938,41 @@ class TestIndexStatusHeartbeat:
         ))
         _print_running_index()
         assert sp.exists()
+
+
+class TestEmbedMemoryBounds:
+    """Guards the memory caps that stop a large-repo index from OOMing."""
+
+    def test_memory_safe_batches_respect_count_cap(self):
+        from ragdoll import embedder as em
+        texts = ["x" * 10] * 1000  # tiny chunks: area budget alone wouldn't split
+        batches = list(em._memory_safe_batches(texts))
+        assert all(len(b) <= em._MAX_BATCH_COUNT for b in batches)
+        assert sum(len(b) for b in batches) == 1000
+
+    def test_memory_safe_batches_respect_area_cap(self):
+        from ragdoll import embedder as em
+        # Long chunks must split into small batches so count*max_len^2 stays bounded.
+        texts = ["y" * 2000] * 50
+        for b in em._memory_safe_batches(texts):
+            longest = max(len(t) for t in b)
+            assert len(b) * longest * longest <= em._EMBED_AREA or len(b) == 1
+
+    def test_default_char_cap_is_bounded(self):
+        from ragdoll import embedder as em
+        # The per-sequence cap is what prevents a single dense chunk from OOMing.
+        assert em._MAX_EMBED_CHARS <= 4096
+
+    def test_embed_truncates_to_char_cap(self, monkeypatch):
+        from ragdoll import embedder as em
+        captured = {}
+
+        class _Spy:
+            def embed(self, texts, **kw):
+                captured["texts"] = list(texts)
+                return [[0.0] * em.EXPECTED_DIM for _ in texts]
+
+        e = em.Embedder()
+        monkeypatch.setattr(e, "_load_model", lambda: _Spy())
+        e.embed(["z" * 50000])
+        assert all(len(t) <= em._MAX_EMBED_CHARS for t in captured["texts"])
