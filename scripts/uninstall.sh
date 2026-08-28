@@ -12,14 +12,23 @@ lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 
 ASSUME_YES=0
 KEEP_DB=0
+FORCE_DB=0
+KEEP_CACHE=0
+PURGE_CACHE=0
 for arg in "$@"; do
     case "$arg" in
-        -y|--yes)     ASSUME_YES=1 ;;
-        --keep-db)    KEEP_DB=1    ;;
+        -y|--yes)      ASSUME_YES=1  ;;
+        --keep-db)     KEEP_DB=1     ;;
+        --force-db)    FORCE_DB=1    ;;
+        --keep-cache)  KEEP_CACHE=1  ;;
+        --purge-cache) PURGE_CACHE=1 ;;
         -h|--help)
-            echo "Usage: uninstall.sh [--yes] [--keep-db]"
-            echo "  --yes       Answer 'y' to prompts (still keeps DB unless --force-db is set)"
-            echo "  --keep-db   Never prompt to delete ~/.ragdoll/ragdoll.db"
+            echo "Usage: uninstall.sh [--yes] [--keep-db] [--force-db] [--keep-cache] [--purge-cache]"
+            echo "  --yes          Answer 'y' to prompts (keeps DB and model cache unless overridden)"
+            echo "  --keep-db      Never prompt to delete ~/.ragdoll/ragdoll.db"
+            echo "  --force-db     Delete the index DB without prompting (non-interactive)"
+            echo "  --keep-cache   Never prompt to delete the embedding-model cache"
+            echo "  --purge-cache  Delete the embedding-model cache without prompting"
             exit 0
             ;;
     esac
@@ -206,10 +215,13 @@ if [[ -f "$DB_PATH" ]]; then
     if [[ $KEEP_DB -eq 1 ]]; then
         log "Keeping database at $DB_PATH ($DB_SIZE) — --keep-db given"
         deldb="n"
+    elif [[ $FORCE_DB -eq 1 ]]; then
+        log "Deleting database at $DB_PATH ($DB_SIZE) — --force-db given"
+        deldb="y"
     else
         # Default answer is "keep" — losing an indexed DB is the worst possible
         # uninstall accident. --yes also chooses "keep" unless the user passed
-        # something stronger.
+        # --force-db.
         ask "Delete index database ($DB_PATH, $DB_SIZE)? [y/N]" deldb "n"
     fi
     if [[ "$(lower "$deldb")" == "y" ]]; then
@@ -221,6 +233,37 @@ if [[ -f "$DB_PATH" ]]; then
     fi
 else
     skip "database not found at $DB_PATH"
+fi
+
+# =============================================================================
+section "Removing embedding-model cache"
+# =============================================================================
+# install.sh downloads the ~200MB ONNX model into this cache. Mirror the exact
+# resolution order install.sh uses so we clean the same directory it created.
+# Default answer is "keep" — the cache may be a shared FastEmbed location used
+# by other tools, so we never delete it non-interactively unless --purge-cache.
+MODEL_CACHE_DIR="${RAGDOLL_MODEL_CACHE:-${FASTEMBED_CACHE_PATH:-$HOME/.cache/fastembed}}"
+if [[ -d "$MODEL_CACHE_DIR" ]]; then
+    CACHE_SIZE=$(du -sh "$MODEL_CACHE_DIR" 2>/dev/null | cut -f1 || echo "unknown size")
+    echo ""
+    if [[ $KEEP_CACHE -eq 1 ]]; then
+        log "Keeping model cache at $MODEL_CACHE_DIR ($CACHE_SIZE) — --keep-cache given"
+        delcache="n"
+    elif [[ $PURGE_CACHE -eq 1 ]]; then
+        log "Deleting model cache at $MODEL_CACHE_DIR ($CACHE_SIZE) — --purge-cache given"
+        delcache="y"
+    else
+        ask "Delete embedding-model cache ($MODEL_CACHE_DIR, $CACHE_SIZE)? [y/N]" delcache "n"
+    fi
+    if [[ "$(lower "$delcache")" == "y" ]]; then
+        rm -rf "$MODEL_CACHE_DIR"
+        success "Deleted model cache"
+    else
+        log "Keeping model cache at $MODEL_CACHE_DIR"
+        log "You can delete it manually later: rm -rf $MODEL_CACHE_DIR"
+    fi
+else
+    skip "model cache not found at $MODEL_CACHE_DIR"
 fi
 
 # --- log directory + stray bookkeeping ---------------------------------------
