@@ -187,8 +187,14 @@ if [[ ! -d "$VENV_DIR" ]]; then
     success "Virtual environment created"
 fi
 
-VENV_PYTHON="$VENV_DIR/bin/python"
-VENV_PIP="$VENV_DIR/bin/pip"
+# Windows (Git Bash / MSYS) venvs use Scripts/ instead of bin/.
+if [[ -d "$VENV_DIR/Scripts" ]]; then
+    VENV_BIN="$VENV_DIR/Scripts"
+else
+    VENV_BIN="$VENV_DIR/bin"
+fi
+VENV_PYTHON="$VENV_BIN/python"
+VENV_PIP="$VENV_BIN/pip"
 
 log "Upgrading pip inside venv..."
 "$VENV_PYTHON" -m pip install --upgrade pip --quiet
@@ -252,7 +258,7 @@ fi
 rm -f "$PIP_LOG"
 
 # Verify the install
-"$VENV_DIR/bin/ragdoll" --help &>/dev/null || die "Installation failed — 'ragdoll' binary not working"
+"$VENV_BIN/ragdoll" --help &>/dev/null || die "Installation failed — 'ragdoll' binary not working"
 success "RAGdoll installed successfully"
 
 # =============================================================================
@@ -266,7 +272,7 @@ WRAPPER_CONTENT="#!/usr/bin/env bash
 # Pin the embedding-model cache so it never lands in a purgeable OS temp dir
 # (prevents the half-downloaded-model NO_SUCHFILE crash). User override wins.
 export RAGDOLL_MODEL_CACHE=\"\${RAGDOLL_MODEL_CACHE:-$MODEL_CACHE_DIR}\"
-exec \"$VENV_DIR/bin/ragdoll\" \"\$@\"
+exec \"$VENV_BIN/ragdoll\" \"\$@\"
 "
 
 # Bin-dir preference order:

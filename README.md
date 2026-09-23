@@ -71,6 +71,20 @@ The installer will:
 - Optionally **prefetch the embedding model** (~200 MB) so first search isn't a multi-minute surprise
 - Optionally install git hooks into your current repo
 
+### Windows
+
+Run the installer from **Git Bash** (ships with [Git for Windows](https://git-scm.com/download/win)):
+
+```bash
+bash scripts/install.sh
+```
+
+Windows virtualenvs use `venv\Scripts\` instead of `venv/bin/` — the installer detects this automatically. The `ragdoll` wrapper it installs is a bash script, so it works from Git Bash. From PowerShell or cmd, call the venv binary directly or add its folder to your `PATH`:
+
+```powershell
+$env:USERPROFILE\.ragdoll\venv\Scripts\ragdoll.exe --help
+```
+
 ### First-run expectations
 
 - The embedding model (`nomic-embed-text-v1.5`, ONNX, ~200 MB) is fetched from Hugging Face on first use unless you opted into the prefetch step. It is cached at `~/.cache/fastembed/` and never re-downloaded.
